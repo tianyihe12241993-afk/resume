@@ -14,3 +14,6 @@ pydantic>=2.8.0
 email-validator>=2.2.0
 bcrypt>=4.0.0
 tzdata>=2024.1  # Windows needs this for ZoneInfo; no-op on macOS/Linux
+google-auth>=2.30.0
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.130.0

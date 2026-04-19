@@ -6,8 +6,6 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from docx import Document
-
 from . import storage, tailoring
 from .db import SessionLocal
 from .models import (
@@ -75,8 +73,7 @@ def _run_single(job_url_id: int) -> None:
         ju.status = STATUS_TAILORING
         db.commit()
 
-        doc = Document(str(src_docx))
-        resume = tailoring.parse_resume(doc)
+        resume = tailoring.parse_resume_from_path(src_docx)
         tailored = tailoring.tailor_resume(
             resume,
             {

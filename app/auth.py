@@ -117,7 +117,7 @@ def issue_invite_token(db: Session, user: User) -> str:
 
 
 def invite_url_for(token: str) -> str:
-    return f"{config.APP_BASE_URL}/setup?token={token}"
+    return f"{config.FRONTEND_URL}/setup?token={token}"
 
 
 def consume_invite_token(db: Session, token: str) -> Optional[User]:

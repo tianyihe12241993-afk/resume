@@ -53,6 +53,7 @@ class Profile(Base):
     owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     base_resume_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    daily_target: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
@@ -124,6 +125,10 @@ class JobUrl(Base):
     )
     applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     application_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Source tag: "manual" (checkbox), "gmail_auto" (detected from inbox), etc.
+    application_source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # When auto-detected: the Gmail message id that evidence came from.
+    application_evidence: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)

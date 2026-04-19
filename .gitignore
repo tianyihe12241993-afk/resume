@@ -7,6 +7,9 @@
 data/
 output/
 
+# --- built React app (produced by `npm --prefix frontend run build`) ---
+app/static/
+
 # --- personal data (do NOT push) ---
 *.docx
 jobs.txt

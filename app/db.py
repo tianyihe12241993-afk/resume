@@ -50,6 +50,9 @@ def _run_lightweight_migrations() -> None:
         ("job_urls", "application_note", "TEXT"),
         ("users", "password_hash", "VARCHAR(255)"),
         ("users", "name", "VARCHAR(255)"),
+        ("profiles", "daily_target", "INTEGER NOT NULL DEFAULT 100"),
+        ("job_urls", "application_source", "VARCHAR(32)"),
+        ("job_urls", "application_evidence", "VARCHAR(255)"),
     ]
     with engine.begin() as conn:
         for table, col, decl in migrations:
@@ -57,5 +60,6 @@ def _run_lightweight_migrations() -> None:
             have = {r[1] for r in rows}
             if col not in have:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {decl}"))
-        # legacy magic-link table is no longer used; drop if present
+        # legacy tables no longer used; drop if present
         conn.execute(text("DROP TABLE IF EXISTS login_tokens"))
+        conn.execute(text("DROP TABLE IF EXISTS gmail_accounts"))

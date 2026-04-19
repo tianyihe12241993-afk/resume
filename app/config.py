@@ -21,6 +21,9 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-secret-change-me")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+# Where the user-facing React app lives. In dev this is the Vite dev server on
+# :5173; in prod it's the same origin as the API.
+FRONTEND_URL = os.getenv("FRONTEND_URL", APP_BASE_URL).rstrip("/")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TAILOR_MODEL = os.getenv("TAILOR_MODEL", "claude-sonnet-4-6")
