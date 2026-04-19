@@ -1,0 +1,27 @@
+# --- secrets & local config ---
+.env
+.env.local
+*.env
+
+# --- runtime data (DB, base resumes, generated outputs) ---
+data/
+output/
+
+# --- personal data (do NOT push) ---
+*.docx
+jobs.txt
+
+# --- python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# --- editor / OS ---
+.DS_Store
+.idea/
+.vscode/
+Thumbs.db

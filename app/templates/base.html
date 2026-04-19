@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}resume-maker{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Used by hx-trigger conditional polling: don't swap while the user
+    // is interacting with a form (so pasted JDs aren't wiped).
+    function shouldPoll() {
+      const el = document.activeElement;
+      if (el) {
+        const tag = el.tagName;
+        if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return false;
+      }
+      // Any open <details> drawer indicates the user is mid-task.
+      if (document.querySelector("details[open]")) return false;
+      return true;
+    }
+  </script>
+  <style>
+    .chip { @apply inline-block text-xs px-2 py-0.5 rounded font-medium; }
+    .chip-pending   { @apply bg-gray-200 text-gray-800; }
+    .chip-fetching  { @apply bg-blue-100 text-blue-800; }
+    .chip-tailoring { @apply bg-purple-100 text-purple-800; }
+    .chip-done      { @apply bg-green-100 text-green-800; }
+    .chip-needs_manual_jd { @apply bg-amber-100 text-amber-900; }
+    .chip-error     { @apply bg-red-100 text-red-800; }
+    .tab { @apply px-3 py-2 text-sm rounded-md text-gray-600 hover:text-gray-900 hover:bg-gray-100; }
+    .tab-active { @apply bg-gray-900 text-white hover:bg-gray-900 hover:text-white; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <header class="bg-white border-b sticky top-0 z-10">
+    <div class="max-w-5xl mx-auto px-6 h-14 flex items-center justify-between gap-4">
+      <a href="/" class="font-semibold text-gray-900 whitespace-nowrap">
+        resume-maker
+      </a>
+      {% if user %}
+        <nav class="flex items-center gap-1">
+          {% if user.role == 'admin' %}
+            <a href="/admin" class="tab {% if nav_active == 'dashboard' %}tab-active{% endif %}">Dashboard</a>
+            <a href="/admin/profiles" class="tab {% if nav_active == 'profiles' %}tab-active{% endif %}">Profiles</a>
+            <a href="/admin/bidders" class="tab {% if nav_active == 'bidders' %}tab-active{% endif %}">Bidders</a>
+            <a href="/admin/calendar" class="tab {% if nav_active == 'calendar' %}tab-active{% endif %}">Calendar</a>
+          {% else %}
+            <a href="/my" class="tab {% if nav_active == 'my' %}tab-active{% endif %}">My resumes</a>
+          {% endif %}
+        </nav>
+        <div class="flex items-center gap-3 text-sm text-gray-600">
+          <a href="/change-password" class="hover:text-gray-900 hidden sm:flex items-center gap-1.5">
+            <span class="text-[10px] px-1.5 py-0.5 rounded font-medium
+                         {% if user.role == 'admin' %}bg-gray-900 text-white
+                         {% else %}bg-blue-100 text-blue-800{% endif %}">
+              {{ user.role }}
+            </span>
+            <span>{{ user.name or user.email }}</span>
+          </a>
+          <form method="post" action="/logout" class="inline">
+            <button class="hover:text-gray-900">Log out</button>
+          </form>
+        </div>
+      {% else %}
+        <a href="/login" class="tab">Log in</a>
+      {% endif %}
+    </div>
+  </header>
+  <main class="max-w-5xl mx-auto px-6 py-6">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

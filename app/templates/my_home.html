@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}My resumes{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold mb-6">My profiles</h1>
+
+{% if profiles %}
+  <ul class="bg-white border rounded divide-y">
+    {% for p in profiles %}
+      <li class="p-4 flex items-center justify-between">
+        <a href="/my/profiles/{{ p.id }}" class="font-medium hover:underline">{{ p.name }}</a>
+        <span class="text-sm text-gray-500">{{ p.batches|length }} batches</span>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="text-sm text-gray-500">
+    You don't have access to any profiles yet. Ask the admin to grant access.
+  </p>
+{% endif %}
+{% endblock %}

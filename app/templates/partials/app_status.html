@@ -1,0 +1,22 @@
+{#
+  "Applied" checkbox for one JobUrl row. Updates in-place via HTMX so the
+  page doesn't scroll back to the top.
+  Arguments: j (JobUrl), batch (Batch)
+#}
+{% set applied = (j.application_status == "applied") %}
+<form hx-post="/batches/{{ batch.id }}/jobs/{{ j.id }}/app-status"
+      hx-target="this" hx-swap="outerHTML"
+      class="inline app-status-form">
+  <input type="hidden" name="status" value="{{ 'new' if applied else 'applied' }}">
+  <label class="flex items-center gap-1.5 text-xs cursor-pointer
+                {% if applied %}text-blue-800 font-medium{% else %}text-gray-600{% endif %}">
+    <input type="checkbox" {% if applied %}checked{% endif %}
+           onchange="htmx.trigger(this.form, 'submit')"
+           class="w-4 h-4 accent-blue-600">
+    <span>
+      applied{% if applied and j.applied_at %}
+        <span class="text-[10px] opacity-70 ml-0.5">{{ j.applied_at|d }}</span>
+      {% endif %}
+    </span>
+  </label>
+</form>

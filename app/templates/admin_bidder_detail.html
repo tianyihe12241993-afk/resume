@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}{{ bidder.name or bidder.email }} · Bidder{% endblock %}
+{% block content %}
+<a href="/admin/bidders" class="text-sm text-gray-500 hover:underline">← Bidders</a>
+
+<div class="flex items-start justify-between mb-6 mt-2">
+  <div>
+    <h1 class="text-2xl font-semibold">{{ bidder.name or "(no name set)" }}</h1>
+    <p class="text-sm text-gray-500">{{ bidder.email }}</p>
+    <p class="text-xs text-gray-500 mt-1">
+      Added {{ bidder.created_at|dt }}
+      {% if bidder.password_hash %}
+        · <span class="text-green-700">password set</span>
+      {% else %}
+        · <span class="text-amber-800">pending setup</span>
+      {% endif %}
+    </p>
+  </div>
+  <div class="flex items-center gap-2">
+    <form method="post" action="/admin/users/{{ bidder.id }}/reset-invite">
+      <button class="text-sm text-gray-600 hover:text-gray-900 border rounded px-3 py-1.5">
+        Reset invite
+      </button>
+    </form>
+  </div>
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+  <section class="bg-white border rounded p-5">
+    <h2 class="text-lg font-semibold mb-3">Name</h2>
+    <form method="post" action="/admin/bidders/{{ bidder.id }}/rename"
+          class="flex items-center gap-2">
+      <input name="name" value="{{ bidder.name or '' }}" placeholder="Full name"
+             class="flex-1 border rounded px-3 py-2 text-sm">
+      <button class="bg-gray-900 text-white rounded px-3 py-2 text-sm">Save</button>
+    </form>
+  </section>
+
+  <section class="bg-white border rounded p-5">
+    <h2 class="text-lg font-semibold mb-3">Access</h2>
+    {% if invite_url %}
+      <p class="text-xs text-amber-900 mb-2">
+        Share this setup link with the bidder:
+      </p>
+      <div class="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+        <input readonly value="{{ invite_url }}" id="invite-one"
+               class="flex-1 bg-transparent text-xs text-amber-900 font-mono min-w-0">
+        <button type="button"
+                onclick="navigator.clipboard.writeText(document.getElementById('invite-one').value);this.textContent='copied'"
+                class="text-[11px] bg-amber-700 text-white rounded px-2 py-0.5">copy</button>
+      </div>
+    {% else %}
+      <p class="text-sm text-gray-500">
+        Bidder has a password set. Use "Reset invite" to regenerate a setup link.
+      </p>
+    {% endif %}
+  </section>
+</div>
+
+<section class="bg-white border rounded p-5 mt-6">
+  <h2 class="text-lg font-semibold mb-3">Assigned profiles</h2>
+  {% if profiles %}
+    <ul class="divide-y">
+      {% for p in profiles %}
+        <li class="py-3 flex items-center justify-between">
+          <a href="/admin/profiles/{{ p.id }}" class="font-medium hover:underline">
+            {{ p.name }}
+          </a>
+          <span class="text-xs text-gray-500">
+            {{ p.batches|length }} batches
+          </span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="text-sm text-gray-500">
+      This bidder has no profile access yet.
+      Open a <a href="/admin" class="text-blue-700 hover:underline">profile</a>
+      and grant them access.
+    </p>
+  {% endif %}
+</section>
+{% endblock %}
