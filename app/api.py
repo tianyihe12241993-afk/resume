@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
-from . import auth, pipeline, storage
+from . import auth, config, pipeline, storage
 from .db import get_db
 from .models import (
     APP_STATUSES, STATUS_DONE, STATUS_PENDING,
@@ -57,6 +57,8 @@ def profile_out(p: Profile, *, has_base: bool | None = None) -> dict:
         "base_resume_filename": p.base_resume_filename,
         "has_base_resume": storage.base_resume_path(p.id).exists() if has_base is None else has_base,
         "batch_count": len(p.batches),
+        "tailor_prompt": p.tailor_prompt or "",
+        "uses_default_prompt": not (p.tailor_prompt or "").strip(),
         "created_at": _iso(p.created_at),
     }
 
@@ -99,9 +101,41 @@ class LoginIn(BaseModel):
     email: EmailStr
     password: str
 
+
+# Sliding-window rate limit for /login.
+# Two independent buckets: per-IP and per-email — whichever fills up first triggers 429.
+import time
+import threading
+_LOGIN_WINDOW_SEC = 60
+_LOGIN_MAX_PER_IP = 10
+_LOGIN_MAX_PER_EMAIL = 5
+_login_attempts: dict[str, list] = {}
+_login_lock = threading.Lock()
+
+
+def _check_login_rate_limit(ip: str, email: str) -> None:
+    now = time.monotonic()
+    cutoff = now - _LOGIN_WINDOW_SEC
+    keys = (f"ip:{ip}", f"em:{email}")
+    limits = (_LOGIN_MAX_PER_IP, _LOGIN_MAX_PER_EMAIL)
+    with _login_lock:
+        for k, limit in zip(keys, limits):
+            bucket = [t for t in _login_attempts.get(k, []) if t > cutoff]
+            _login_attempts[k] = bucket
+            if len(bucket) >= limit:
+                raise HTTPException(
+                    429,
+                    "Too many login attempts. Please wait a minute and try again.",
+                )
+        for k in keys:
+            _login_attempts.setdefault(k, []).append(now)
+
+
 @router.post("/login")
-def api_login(body: LoginIn, db: Session = Depends(get_db)):
+def api_login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     email = body.email.strip().lower()
+    ip = (request.client.host if request.client else "unknown")
+    _check_login_rate_limit(ip, email)
     user = db.query(User).filter(User.email == email).first()
     if user is None or not auth.verify_password(body.password, user.password_hash):
         raise HTTPException(401, "Invalid email or password")
@@ -280,6 +314,15 @@ def api_admin_dashboard(
 
 # ── admin: profiles ────────────────────────────────────────────────────────
 
+@router.get("/admin/tailor-prompt-default")
+def api_admin_tailor_prompt_default(
+    admin: User = Depends(auth.require_admin),
+):
+    """The built-in tailoring prompt — shown to admins as the fallback."""
+    from . import tailoring
+    return {"prompt": tailoring.TAILOR_SYSTEM}
+
+
 @router.get("/admin/profiles")
 def api_admin_profiles(
     admin: User = Depends(auth.require_admin),
@@ -305,6 +348,8 @@ def api_admin_profiles_create(
 
 class ProfileUpdateIn(BaseModel):
     name: Optional[str] = None
+    # Pass an empty string to fall back to the global default prompt.
+    tailor_prompt: Optional[str] = None
 
 @router.post("/admin/profiles/{pid}/delete")
 def api_admin_profile_delete(
@@ -338,6 +383,10 @@ def api_admin_profile_update(
     if p is None: raise HTTPException(404)
     if body.name is not None and body.name.strip():
         p.name = body.name.strip()
+    if body.tailor_prompt is not None:
+        # Empty string clears the override and falls back to the default.
+        cleaned = body.tailor_prompt.strip()
+        p.tailor_prompt = cleaned or None
     db.commit()
     return {"profile": profile_out(p)}
 
@@ -509,6 +558,12 @@ def api_admin_batch_create(
             seen.add(u); lines.append(u)
     if not lines:
         raise HTTPException(400, "Paste at least one URL.")
+    if len(lines) > config.MAX_URLS_PER_BATCH:
+        raise HTTPException(
+            400,
+            f"That's {len(lines)} URLs — capped at {config.MAX_URLS_PER_BATCH} per submit "
+            "to keep API costs in check. Submit in chunks.",
+        )
 
     done_urls = {u for (u,) in (
         db.query(JobUrl.url).join(Batch, Batch.id == JobUrl.batch_id)
@@ -591,6 +646,30 @@ def api_admin_manual_jd(
 ):
     ju = db.get(JobUrl, jid)
     if ju is None or ju.batch_id != bid: raise HTTPException(404)
+    if not body.description.strip() or len(body.description.strip()) < 100:
+        raise HTTPException(400, "Paste at least 100 characters of job description.")
+    ju.company = (body.company or "").strip() or ju.company
+    ju.title = (body.title or "").strip() or ju.title
+    ju.location = (body.location or "").strip() or ju.location
+    ju.description = body.description.strip()
+    ju.status = STATUS_PENDING
+    ju.error_message = None
+    db.commit()
+    pipeline.enqueue(ju.id)
+    return {"job": job_out(ju)}
+
+
+@router.post("/batches/{bid}/jobs/{jid}/manual-jd")
+def api_manual_jd(
+    bid: int, jid: int, body: ManualJDIn,
+    user: User = Depends(auth.require_user),
+    db: Session = Depends(get_db),
+):
+    """Anyone with access to the batch (admin or granted bidder) can paste the
+    job description to unblock a `needs_manual_jd` row and re-run the pipeline."""
+    ju = db.get(JobUrl, jid)
+    if ju is None or ju.batch_id != bid: raise HTTPException(404)
+    _check_batch_access(user, ju.batch, db)
     if not body.description.strip() or len(body.description.strip()) < 100:
         raise HTTPException(400, "Paste at least 100 characters of job description.")
     ju.company = (body.company or "").strip() or ju.company
@@ -727,6 +806,12 @@ def api_my_profile(
             "created_at": _iso(b.created_at),
             "total": len(b.urls),
             "done": sum(1 for j in b.urls if j.status == STATUS_DONE),
+            "needs_jd": sum(1 for j in b.urls if j.status == "needs_manual_jd"),
+            "in_flight": sum(
+                1 for j in b.urls
+                if j.status in ("pending", "fetching", "tailoring")
+            ),
+            "errors": sum(1 for j in b.urls if j.status == "error"),
         } for b in batches],
     }
 
@@ -749,16 +834,22 @@ def api_my_batch(
     b = db.get(Batch, bid)
     if b is None: raise HTTPException(404)
     _check_batch_access(user, b, db)
-    jobs = (db.query(JobUrl).filter(JobUrl.batch_id == bid, JobUrl.status == STATUS_DONE)
-            .order_by(JobUrl.id.asc()).all())
-    applied = sum(1 for j in jobs if j.application_status == "applied")
+    # Bidders see every URL in the batch so they know why a number is missing
+    # (still scraping, needs JD, errored, etc.). Done URLs appear first so the
+    # usable resumes are always on top.
+    jobs_all = (db.query(JobUrl).filter(JobUrl.batch_id == bid)
+                .order_by(JobUrl.id.asc()).all())
+    done_jobs = [j for j in jobs_all if j.status == STATUS_DONE]
+    pending_jobs = [j for j in jobs_all if j.status != STATUS_DONE]
+    applied = sum(1 for j in done_jobs if j.application_status == "applied")
     return {
         "batch": {"id": b.id, "created_at": _iso(b.created_at)},
         "profile": {
             "id": b.profile.id,
             "name": b.profile.name,
         },
-        "jobs": [job_out(j) for j in jobs],
+        "jobs": [job_out(j) for j in done_jobs],
+        "pending_jobs": [job_out(j) for j in pending_jobs],
         "applied": applied,
     }
 

@@ -268,15 +268,78 @@ def _heuristic_analyze(items: list[tuple[int, str, str]]) -> dict:
     return {"summary_indices": summary_indices, "jobs": jobs, "skills": skills}
 
 
+_LEAD_TERMINATORS = (":", "—", "–", " - ", " · ", "•")
+
+
+def _split_lead_in_new_text(new_text: str) -> Optional[int]:
+    """Return the index AFTER the lead-in terminator (':', '—', etc) in new_text,
+    if there is one near the start of the bullet. None if the new text doesn't
+    fit the labeled-bullet pattern."""
+    # Only consider the first ~80 chars — beyond that it's not a lead-in.
+    head = new_text[:80]
+    candidates: list[int] = []
+    for term in _LEAD_TERMINATORS:
+        idx = head.find(term)
+        if idx > 0:
+            candidates.append(idx + len(term))
+    if not candidates:
+        return None
+    # Use the earliest terminator.
+    return min(candidates)
+
+
 def set_paragraph_text(p, new_text: str) -> None:
-    """Replace paragraph text, keep paragraph style + first-run formatting."""
+    """Replace a paragraph's text, preserving its formatting structure.
+
+    Three patterns the resume parser sees regularly:
+      1. A single run (uniform formatting) → easy: just replace text.
+      2. "**Bold lead-in:** plain body" — the labeled-bullet pattern. Preserve
+         the bold/plain split if the new text also has a lead terminator.
+      3. Anything else → keep whichever run carried the most characters
+         (majority-wins) so the dominant formatting is preserved.
+    """
     runs = list(p.runs)
     if not runs:
         p.add_run(new_text)
         return
-    runs[0].text = new_text
-    for r in runs[1:]:
-        r._element.getparent().remove(r._element)
+
+    if len(runs) == 1:
+        runs[0].text = new_text
+        return
+
+    # Try to detect the labeled-bullet pattern: a bold first run that ends
+    # with a label terminator, followed by a non-bold run carrying the body.
+    first = runs[0]
+    first_text = (first.text or "").rstrip()
+    looks_like_label = (
+        bool(first.bold)
+        and any(first_text.endswith(t.strip()) for t in _LEAD_TERMINATORS if t.strip())
+        and any((not r.bold) and (r.text or "").strip() for r in runs[1:])
+    )
+    if looks_like_label:
+        split_at = _split_lead_in_new_text(new_text)
+        if split_at is not None:
+            lead = new_text[:split_at].rstrip()
+            body = new_text[split_at:]
+            # Preserve a leading space so "Lead: body" doesn't collapse to "Lead:body".
+            if body and not body.startswith(" "):
+                body = " " + body
+            first.text = lead
+            plain_run = next((r for r in runs[1:] if not r.bold), runs[1])
+            plain_run.text = body
+            for r in runs:
+                if r is not first and r is not plain_run:
+                    r._element.getparent().remove(r._element)
+            return
+
+    # Fallback: majority-wins. Resume bullets typically have a short bold
+    # lead and a long plain body — picking the longest run keeps the body's
+    # formatting, which is what authors want for the bulk of the text.
+    keep = max(runs, key=lambda r: len(r.text or ""))
+    keep.text = new_text
+    for r in runs:
+        if r is not keep:
+            r._element.getparent().remove(r._element)
 
 
 # --------------------------------------------------------------------------
@@ -347,13 +410,13 @@ WORKFLOW (think through internally before writing output):
 4. Rewrite the summary, reorder bullets, and reorder skill categories per the rules below.
 
 HARD RULES — any violation invalidates the output:
-1. NEVER invent technologies, companies, projects, metrics, titles, dates, or responsibilities not already present.
+1. NEVER invent job experience: no new bullets, no new employers, no fake projects, no metrics that did not exist, no titles or dates that aren't in the resume.
 2. Preserve EXACTLY the same number of bullets per job. Same number of skill categories.
-3. Preserve every metric (percentages, latencies, team sizes, user counts, revenue) verbatim. You may move them; you cannot change or remove them.
+3. Preserve every metric (percentages, latencies, team sizes, user counts, revenue) verbatim within bullets. You may move them; you cannot change or remove them.
 4. Preserve every tech-stack term, company name, and product name that appears in a bullet. Rewording the verbs and structure is allowed; the nouns that carry facts are NOT.
 5. Third-person / action-verb voice throughout. No "I", "we", "my", "our".
 6. Do NOT mention the target company or target job title inside the resume body.
-7. Keep the output grounded in the input's truth. Paraphrasing is fine; shifting the claim is not.
+7. SKILLS section is the ONE place you may add JD keywords the candidate doesn't already list (rules below). Bullets and summary stay grounded in the candidate's actual experience.
 
 SUMMARY (3–5 sentences, ~60–110 words, matches input length ±20%):
 - Sentence 1: years of experience + role identity + DOMAIN signal that matches the JD (pull the JD's domain word when possible, e.g. "fintech", "healthtech", "developer tools", "e-commerce").
@@ -374,6 +437,9 @@ SKILLS:
 - Reorder categories so the most JD-relevant ones come first.
 - Within a category, reorder items so the JD-relevant ones lead.
 - You MAY slightly rename a category label to match common vocabulary (e.g. "Cloud / DevOps" → "Cloud & Infrastructure") if it aids scannability.
+- You MAY ADD new items to existing categories when the JD names a tech the candidate doesn't currently list. Place added items at the END of the most appropriate category, after the original items. Cap added items at ~3 per category and ~6 total across the resume — only add things the JD explicitly emphasizes.
+- Added items must be plausibly adjacent to what the candidate already has (e.g. add "GraphQL" if they already list "REST APIs"; add "Kotlin" if they already list "Java"). Do NOT add a totally unrelated tech (e.g. don't add "Solidity" to a backend Python candidate).
+- Do NOT add new categories. Use existing ones.
 
 OUTPUT FORMAT — emit ONLY the XML below, nothing else. No prose, no markdown, no JSON, no explanation. Include a section only if the corresponding section was present in the input.
 
@@ -400,8 +466,13 @@ XML RULES:
 
 
 
-def tailor_resume(resume: ResumeStruct, job: dict) -> dict:
+def tailor_resume(
+    resume: ResumeStruct, job: dict, *, system_prompt: Optional[str] = None
+) -> dict:
+    """Tailor `resume` for `job`. If `system_prompt` is non-empty, override
+    the global default."""
     client = _client()
+    sys_prompt = (system_prompt or "").strip() or TAILOR_SYSTEM
 
     input_parts: list[str] = []
     if resume.has_summary:
@@ -454,13 +525,14 @@ def tailor_resume(resume: ResumeStruct, job: dict) -> dict:
         model=config.TAILOR_MODEL,
         max_tokens=4000,
         temperature=0,
-        system=TAILOR_SYSTEM,
+        system=sys_prompt,
         messages=[{"role": "user", "content": user_msg}],
     )
     text = "".join(
         b.text for b in resp.content if getattr(b, "type", None) == "text"
     )
     out = _parse_xml_output(text, resume)
+    _repair_output(out, resume)
     _validate_tailored(out, resume)
     return out
 
@@ -519,10 +591,80 @@ def _parse_xml_output(text: str, resume: ResumeStruct) -> dict:
     }
 
 
+def _repair_output(out: dict, resume: ResumeStruct) -> None:
+    """Fill in anything the model dropped by falling back to the original resume.
+
+    Claude occasionally omits a skill category or the summary block. Rather
+    than fail the whole row (which wastes the tailoring call we just paid for),
+    we patch the missing pieces with the original content. The model's ordering
+    and added items are preserved; we only add back what it left out.
+    """
+    # Summary: if the input had one but the model didn't emit one, keep the
+    # original summary unchanged rather than erroring out.
+    if resume.has_summary:
+        s = out.get("summary")
+        if not isinstance(s, str) or not s.strip():
+            out["summary"] = resume.summary
+
+    # Bullets: per-job padding. If a job's bullet list is too short, append the
+    # missing original bullets (at the end) so the count matches the layout.
+    bullets = out.get("bullets")
+    if not isinstance(bullets, list):
+        bullets = []
+    while len(bullets) < len(resume.jobs):
+        rj = resume.jobs[len(bullets)]
+        bullets.append([b.strip() for b in rj.bullets])
+    for i, (inner, rj) in enumerate(zip(bullets, resume.jobs)):
+        if not isinstance(inner, list):
+            bullets[i] = [b.strip() for b in rj.bullets]
+            continue
+        if len(inner) < len(rj.bullets):
+            # Missing bullets: fill with originals that the model didn't keep,
+            # matched case-insensitively so we don't duplicate what's already there.
+            have = {str(b).strip().lower() for b in inner}
+            for orig in rj.bullets:
+                if orig.strip().lower() not in have:
+                    inner.append(orig.strip())
+                if len(inner) >= len(rj.bullets):
+                    break
+            # If still short (the model reworded everything), pad at the end.
+            while len(inner) < len(rj.bullets):
+                inner.append(rj.bullets[len(inner)].strip())
+        elif len(inner) > len(rj.bullets):
+            # Model added bullets — trim to the original count (layout fixed).
+            bullets[i] = inner[: len(rj.bullets)]
+    out["bullets"] = bullets
+
+    # Skill categories + items: if short, append the originals the model
+    # didn't include (matched case-insensitively by category label).
+    if resume.skills:
+        sc = list(out.get("skill_categories") or [])
+        si = list(out.get("skill_items") or [])
+        # Make both lists equal in length first (trim one if mismatched).
+        n = min(len(sc), len(si))
+        sc, si = sc[:n], si[:n]
+        if len(sc) < len(resume.skills):
+            have = {str(c).strip().lower() for c in sc}
+            for s in resume.skills:
+                if s.category.strip().lower() not in have:
+                    sc.append(s.category.strip())
+                    si.append(s.items.strip())
+                if len(sc) >= len(resume.skills):
+                    break
+            # Last resort pad (e.g. model renamed every category).
+            while len(sc) < len(resume.skills):
+                k = len(sc)
+                sc.append(resume.skills[k].category.strip())
+                si.append(resume.skills[k].items.strip())
+        out["skill_categories"] = sc
+        out["skill_items"] = si
+
+
 def _validate_tailored(out: dict, resume: ResumeStruct) -> None:
+    """Hard-check after repair. Any remaining mismatch is a real bug."""
     if resume.has_summary:
         if not isinstance(out.get("summary"), str) or not out["summary"].strip():
-            raise ValueError("Tailored output missing summary.")
+            raise ValueError("Tailored output missing summary even after repair.")
 
     bullets = out.get("bullets")
     if not isinstance(bullets, list) or len(bullets) != len(resume.jobs):

@@ -267,7 +267,7 @@ function ProfileCard({
         />
       </div>
 
-      {hasTodayBatch ? (
+      {hasTodayBatch && (
         <>
           <StatusStack
             total={summary.total}
@@ -284,22 +284,37 @@ function ProfileCard({
             </div>
           )}
         </>
-      ) : profile.has_base_resume ? (
-        <button
-          onClick={(e) => { e.preventDefault(); e.stopPropagation(); onStart() }}
-          className="btn-primary w-full text-sm"
-        >
-          <Plus className="w-4 h-4" /> Start today's batch
-        </button>
-      ) : (
-        <Link
-          to={`/admin/profiles/${profile.id}`}
-          onClick={(e) => e.stopPropagation()}
-          className="btn-secondary w-full text-sm"
-        >
-          <Upload className="w-4 h-4" /> Upload base resume to start
-        </Link>
       )}
+
+      {/* Always show a batch action button — new batch or add more URLs. */}
+      <div className={clsx('flex gap-2', hasTodayBatch && 'mt-4')}>
+        {profile.has_base_resume ? (
+          <button
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); onStart() }}
+            className="btn-primary flex-1 text-sm"
+          >
+            <Plus className="w-4 h-4" />
+            {hasTodayBatch ? "Add more URLs" : "Start today's batch"}
+          </button>
+        ) : (
+          <Link
+            to={`/admin/profiles/${profile.id}`}
+            onClick={(e) => e.stopPropagation()}
+            className="btn-secondary flex-1 text-sm"
+          >
+            <Upload className="w-4 h-4" /> Upload base resume to start
+          </Link>
+        )}
+        {hasTodayBatch && (
+          <Link
+            to={`/admin/batches/${today_batch!.id}`}
+            onClick={(e) => e.stopPropagation()}
+            className="btn-secondary text-sm"
+          >
+            Open
+          </Link>
+        )}
+      </div>
     </CardWrapper>
   )
 }

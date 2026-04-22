@@ -1,6 +1,8 @@
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  status: number
+  constructor(status: number, message: string) {
     super(message)
+    this.status = status
   }
 }
 
@@ -58,6 +60,8 @@ export interface Profile {
   base_resume_filename: string | null
   has_base_resume: boolean
   batch_count: number
+  tailor_prompt: string
+  uses_default_prompt: boolean
   created_at: string
 }
 
@@ -139,12 +143,21 @@ export interface CalendarData {
 
 export interface MyProfile {
   profile: Profile
-  batches: { id: number; created_at: string; total: number; done: number }[]
+  batches: {
+    id: number
+    created_at: string
+    total: number
+    done: number
+    needs_jd: number
+    in_flight: number
+    errors: number
+  }[]
 }
 
 export interface MyBatch {
   batch: { id: number; created_at: string }
   profile: { id: number; name: string }
-  jobs: Job[]
+  jobs: Job[]                // done resumes (downloadable)
+  pending_jobs: Job[]        // still in progress / needs JD / errored
   applied: number
 }

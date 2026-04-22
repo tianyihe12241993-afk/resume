@@ -1,10 +1,10 @@
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, Download, ExternalLink, Target, StickyNote } from 'lucide-react'
+import { ChevronLeft, Download, ExternalLink, Target, StickyNote, ClipboardPaste } from 'lucide-react'
 import clsx from 'clsx'
 import { useState } from 'react'
 import { api, type MyBatch, type Job } from '@/lib/api'
-import { Empty, Progress } from '@/components/ui'
+import { Alert, Chip, Empty, Progress } from '@/components/ui'
 import { formatDateTime } from '@/lib/format'
 
 export default function MyBatchPage() {
@@ -41,6 +41,7 @@ export default function MyBatchPage() {
 
   if (!data) return <div className="text-center text-gray-400 text-sm">Loading…</div>
   const { profile, batch, jobs, applied } = data
+  const pendingJobs = data.pending_jobs || []
   const tailored = jobs.length
   const percent = tailored > 0 ? Math.min(100, Math.round(100 * applied / tailored)) : 0
   const hit = tailored > 0 && applied >= tailored
@@ -93,8 +94,8 @@ export default function MyBatchPage() {
         <Progress percent={percent} color={hit ? 'green' : 'blue'} />
       </div>
 
-      {jobs.length === 0 ? (
-        <Empty>No tailored resumes are ready in this batch yet.</Empty>
+      {jobs.length === 0 && pendingJobs.length === 0 ? (
+        <Empty>No resumes are being tailored in this batch yet.</Empty>
       ) : (
         <div className="card overflow-hidden">
           <div className="overflow-x-auto">
@@ -102,20 +103,27 @@ export default function MyBatchPage() {
               <thead className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
                 <tr className="text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
                   <Th className="w-10 text-center">#</Th>
+                  <Th className="w-[110px]">Status</Th>
                   <Th className="w-16 text-center">Done</Th>
-                  <Th className="w-[180px]">Company</Th>
+                  <Th className="w-[170px]">Company</Th>
                   <Th>Role</Th>
-                  <Th className="w-[200px]">Location</Th>
+                  <Th className="w-[180px]">Location</Th>
                   <Th className="w-[90px] text-center">Job</Th>
                   <Th className="w-[120px] text-center">Resume</Th>
                   <Th className="w-[40px]"></Th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {jobs.map((j, i) => (
-                  <BidderRow key={j.id} job={j} index={i + 1}
-                             onToggle={() => toggle.mutate(j)} />
-                ))}
+                {[...jobs, ...pendingJobs]
+                  .sort((a, b) => a.id - b.id)
+                  .map((j, i) => (
+                    <BidderRow
+                      key={j.id}
+                      job={j}
+                      index={i + 1}
+                      onToggle={() => toggle.mutate(j)}
+                    />
+                  ))}
               </tbody>
             </table>
           </div>
@@ -125,36 +133,50 @@ export default function MyBatchPage() {
   )
 }
 
-function Th({ className, children }: { className?: string; children: React.ReactNode }) {
+
+function Th({ className, children }: { className?: string; children?: React.ReactNode }) {
   return <th className={clsx('px-3 py-2.5 font-semibold', className)}>{children}</th>
 }
 
 function BidderRow({ job, index, onToggle }: { job: Job; index: number; onToggle: () => void }) {
   const [showNote, setShowNote] = useState(false)
-  const isApplied = job.application_status === 'applied'
+  const [showJd, setShowJd] = useState(false)
+  const isDone = job.status === 'done'
+  const isApplied = isDone && job.application_status === 'applied'
+  const canPasteJd = job.status === 'needs_manual_jd' || job.status === 'error'
   return (
     <>
       <tr className={clsx(
         'hover:bg-slate-50 transition',
         isApplied && 'bg-green-50/40',
+        !isDone && 'bg-slate-50/40',
       )}>
         <td className="px-3 py-2 text-center text-xs text-gray-400 tabular-nums">{index}</td>
+        <td className="px-3 py-2" title={job.error_message || ''}>
+          <Chip status={job.status} />
+        </td>
         <td className="px-3 py-2 text-center">
           <input
             type="checkbox"
             checked={isApplied}
             onChange={onToggle}
-            title="Tick after you apply"
-            className="w-5 h-5 rounded border-2 border-gray-300 text-brand-600 focus:ring-brand-500 cursor-pointer"
+            disabled={!isDone}
+            title={isDone ? "Tick after you apply" : "Available once the resume is ready"}
+            className={clsx(
+              'w-5 h-5 rounded border-2 border-gray-300 text-brand-600 focus:ring-brand-500',
+              isDone ? 'cursor-pointer' : 'cursor-not-allowed opacity-40',
+            )}
           />
         </td>
         <td className={clsx('px-3 py-2 font-medium truncate',
-          isApplied ? 'text-gray-500 line-through decoration-gray-300' : 'text-gray-900')}
+          isApplied ? 'text-gray-500 line-through decoration-gray-300'
+          : isDone ? 'text-gray-900' : 'text-gray-500')}
           title={job.company || ''}>
           {job.company || <span className="text-gray-300">—</span>}
         </td>
         <td className={clsx('px-3 py-2 truncate',
-          isApplied ? 'text-gray-500 line-through decoration-gray-300' : 'text-gray-900')}
+          isApplied ? 'text-gray-500 line-through decoration-gray-300'
+          : isDone ? 'text-gray-900' : 'text-gray-500')}
           title={job.title || ''}>
           {job.title || <span className="text-gray-300">—</span>}
         </td>
@@ -168,30 +190,114 @@ function BidderRow({ job, index, onToggle }: { job: Job; index: number; onToggle
           </a>
         </td>
         <td className="px-3 py-2 text-center">
-          {job.has_docx ? (
+          {isDone && job.has_docx ? (
             <a href={`/download/${job.id}/docx`}
                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded transition shadow-sm"
             ><Download className="w-3 h-3" /> Download</a>
-          ) : <span className="text-gray-300 text-xs">—</span>}
+          ) : canPasteJd ? (
+            <button
+              onClick={() => setShowJd(!showJd)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-amber-900 bg-amber-100 border border-amber-300 hover:bg-amber-200 rounded transition"
+              title="Paste the job description to re-run tailoring"
+            >
+              <ClipboardPaste className="w-3 h-3" /> Paste JD
+            </button>
+          ) : (
+            <span className="text-gray-300 text-xs">—</span>
+          )}
         </td>
         <td className="px-3 py-2 text-center">
-          <button
-            onClick={() => setShowNote(!showNote)}
-            className={clsx('transition', job.application_note ? 'text-brand-500' : 'text-gray-300 hover:text-gray-500')}
-            title={job.application_note || 'Add note'}
-          >
-            <StickyNote className="w-3.5 h-3.5" />
-          </button>
+          {isDone && (
+            <button
+              onClick={() => setShowNote(!showNote)}
+              className={clsx('transition', job.application_note ? 'text-brand-500' : 'text-gray-300 hover:text-gray-500')}
+              title={job.application_note || 'Add note'}
+            >
+              <StickyNote className="w-3.5 h-3.5" />
+            </button>
+          )}
         </td>
       </tr>
-      {showNote && (
+      {showNote && isDone && (
         <tr className="bg-slate-50/60">
-          <td colSpan={8} className="px-3 py-2">
+          <td colSpan={9} className="px-3 py-2">
             <NoteEditor job={job} onDone={() => setShowNote(false)} />
           </td>
         </tr>
       )}
+      {showJd && canPasteJd && (
+        <tr className="bg-amber-50/60">
+          <td colSpan={9} className="px-4 py-3">
+            <PasteJdForm job={job} onDone={() => setShowJd(false)} />
+          </td>
+        </tr>
+      )}
     </>
+  )
+}
+
+
+function PasteJdForm({ job, onDone }: { job: Job; onDone: () => void }) {
+  const qc = useQueryClient()
+  const [company, setCompany] = useState(job.company || '')
+  const [title, setTitle] = useState(job.title || '')
+  const [location, setLocation] = useState(job.location || '')
+  const [description, setDescription] = useState(job.description || '')
+
+  const save = useMutation({
+    mutationFn: () => {
+      const m = window.location.pathname.match(/\/batches\/(\d+)/)
+      const bid = m ? Number(m[1]) : 0
+      return api.post(`/api/batches/${bid}/jobs/${job.id}/manual-jd`, {
+        company, title, location, description,
+      })
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['my/batch'] }); onDone() },
+  })
+
+  const tooShort = description.trim().length < 100
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 text-xs text-amber-900">
+        <ClipboardPaste className="w-3.5 h-3.5 shrink-0" />
+        <span className="font-medium">
+          Paste the full job description from <a href={job.url} target="_blank" rel="noopener noreferrer" className="underline">the posting</a> to re-run tailoring.
+        </span>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <input value={company} onChange={(e) => setCompany(e.target.value)}
+               placeholder="Company" className="input text-sm" />
+        <input value={title} onChange={(e) => setTitle(e.target.value)}
+               placeholder="Title" className="input text-sm" />
+        <input value={location} onChange={(e) => setLocation(e.target.value)}
+               placeholder="Location" className="input text-sm" />
+      </div>
+      <textarea
+        rows={8}
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        placeholder="Paste the full job description here (min 100 characters)…"
+        className="input text-sm w-full font-mono"
+      />
+      {save.isError && <Alert variant="error">{(save.error as Error).message}</Alert>}
+      <div className="flex items-center justify-between">
+        <p className="text-[11px] text-gray-500">
+          {description.trim().length.toLocaleString()} chars
+          {tooShort && ' · need at least 100'}
+        </p>
+        <div className="flex items-center gap-2">
+          <button onClick={onDone} className="btn-secondary text-xs py-1.5 px-3">Cancel</button>
+          <button
+            onClick={() => save.mutate()}
+            disabled={tooShort || save.isPending}
+            className="btn-primary text-xs py-1.5 px-3"
+          >
+            {save.isPending ? 'Saving…' : 'Save JD & re-run'}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 

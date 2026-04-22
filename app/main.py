@@ -9,12 +9,13 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
+from starlette.middleware.base import BaseHTTPMiddleware
 
-from . import api, auth, storage
+from . import api, auth, config, storage
 from .db import SessionLocal, get_db, init_db
 from .models import Batch, JobUrl, ProfileAccess, STATUS_DONE, User
 
@@ -22,6 +23,23 @@ PACIFIC = ZoneInfo("America/Los_Angeles")
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(title="Resume Builder")
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        resp = await call_next(request)
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        resp.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        # Tell browsers to keep using HTTPS for the next 6 months once they've
+        # seen this header. Only meaningful when the cookie is also Secure.
+        if config.COOKIE_SECURE:
+            resp.headers["Strict-Transport-Security"] = "max-age=15552000"
+        return resp
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 @app.on_event("startup")

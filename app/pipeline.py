@@ -82,6 +82,7 @@ def _run_single(job_url_id: int) -> None:
                 "location": ju.location or "",
                 "description": ju.description or "",
             },
+            system_prompt=profile.tailor_prompt,
         )
 
         docx_out = storage.generated_docx_path(batch.id, ju.id)

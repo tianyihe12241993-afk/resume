@@ -3,7 +3,7 @@ import { Link, useParams, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronLeft, Check, TriangleAlert, Copy,
-  Upload, FileText, Pencil, Trash2, KeyRound, Mail, AlertOctagon,
+  Upload, FileText, Pencil, Trash2, KeyRound, Mail, AlertOctagon, Wand2,
 } from 'lucide-react'
 import { api, type ProfileDetail } from '@/lib/api'
 import { Alert } from '@/components/ui'
@@ -32,8 +32,24 @@ export default function ProfileDetailPage() {
   const [urls, setUrls] = useState('')
   const [copied, setCopied] = useState<number | null>(null)
 
+  // Tailor prompt state
+  const [prompt, setPrompt] = useState('')
+  const [promptDirty, setPromptDirty] = useState(false)
+  useEffect(() => {
+    if (data) {
+      setPrompt(data.profile.tailor_prompt || '')
+      setPromptDirty(false)
+    }
+  }, [data])
+
+  const { data: defaultPrompt } = useQuery({
+    queryKey: ['admin/tailor-prompt-default'],
+    queryFn: () => api.get<{ prompt: string }>('/api/admin/tailor-prompt-default'),
+    staleTime: Infinity,
+  })
+
   const saveProfile = useMutation({
-    mutationFn: (patch: { name?: string }) =>
+    mutationFn: (patch: { name?: string; tailor_prompt?: string }) =>
       api.post(`/api/admin/profiles/${pid}/update`, patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/profile', pid] }),
   })
@@ -142,6 +158,68 @@ export default function ProfileDetailPage() {
           </button>
           {upload.isError && <div className="mt-2"><Alert variant="error">{(upload.error as Error).message}</Alert></div>}
         </div>
+      </div>
+
+      {/* ── Tailoring prompt ──────────────────────────────────────── */}
+      <div className="card p-5 mb-6">
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <Wand2 className="w-4 h-4 text-brand-500" />
+            <h2 className="text-base font-semibold text-gray-900">Tailoring prompt</h2>
+            {profile.uses_default_prompt ? (
+              <span className="chip bg-gray-100 text-gray-600">using default</span>
+            ) : (
+              <span className="chip chip-tailoring">custom</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {prompt && (
+              <button type="button" disabled={saveProfile.isPending}
+                      onClick={() => {
+                        if (!confirm('Clear this profile\'s custom prompt and fall back to the default?')) return
+                        saveProfile.mutate({ tailor_prompt: '' })
+                      }}
+                      className="text-xs text-gray-500 hover:text-red-600 transition">
+                Clear &amp; use default
+              </button>
+            )}
+            {defaultPrompt && (
+              <button type="button"
+                      onClick={() => { setPrompt(defaultPrompt.prompt); setPromptDirty(true) }}
+                      className="text-xs text-gray-500 hover:text-brand-600 transition">
+                Load default
+              </button>
+            )}
+          </div>
+        </div>
+        <p className="text-xs text-gray-400 mb-3">
+          Override the system prompt sent to Claude when tailoring resumes for this profile.
+          Leave empty to use the built-in default. Edits apply to future batches only —
+          already-tailored resumes won't change.
+        </p>
+        <textarea
+          rows={14}
+          value={prompt}
+          onChange={(e) => { setPrompt(e.target.value); setPromptDirty(true) }}
+          placeholder={defaultPrompt?.prompt ?? 'Loading default prompt…'}
+          className="input font-mono text-xs leading-relaxed resize-y w-full"
+        />
+        <div className="flex items-center justify-between mt-3">
+          <p className="text-xs text-gray-400">
+            {prompt.length.toLocaleString()} chars
+            {prompt.trim() === (defaultPrompt?.prompt ?? '').trim() && prompt &&
+              ' · matches the default exactly'}
+          </p>
+          <button type="button"
+                  disabled={!promptDirty || saveProfile.isPending}
+                  onClick={() => { saveProfile.mutate({ tailor_prompt: prompt }) }}
+                  className="btn-primary text-sm">
+            {saveProfile.isPending ? 'Saving…' : 'Save prompt'}
+          </button>
+        </div>
+        {saveProfile.isError && (
+          <div className="mt-2"><Alert variant="error">{(saveProfile.error as Error).message}</Alert></div>
+        )}
       </div>
 
       {/* ── Bidder access ──────────────────────────────────────────── */}

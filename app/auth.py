@@ -1,4 +1,4 @@
-"""Password auth + one-time invite tokens + signed session cookie."""
+"""Password auth + invite tokens + signed session cookie."""
 from __future__ import annotations
 
 import secrets
@@ -45,7 +45,7 @@ def set_session(response, user_id: int) -> None:
         max_age=SESSION_MAX_AGE,
         httponly=True,
         samesite="lax",
-        secure=False,  # flip to True behind HTTPS
+        secure=config.COOKIE_SECURE,
     )
 
 
@@ -197,3 +197,4 @@ def ensure_admin_seeded(db: Session) -> None:
             f"[bootstrap]   {url}\n",
             flush=True,
         )
+

@@ -51,6 +51,7 @@ def _run_lightweight_migrations() -> None:
         ("users", "password_hash", "VARCHAR(255)"),
         ("users", "name", "VARCHAR(255)"),
         ("profiles", "daily_target", "INTEGER NOT NULL DEFAULT 100"),
+        ("profiles", "tailor_prompt", "TEXT"),
         ("job_urls", "application_source", "VARCHAR(32)"),
         ("job_urls", "application_evidence", "VARCHAR(255)"),
     ]
@@ -63,3 +64,5 @@ def _run_lightweight_migrations() -> None:
         # legacy tables no longer used; drop if present
         conn.execute(text("DROP TABLE IF EXISTS login_tokens"))
         conn.execute(text("DROP TABLE IF EXISTS gmail_accounts"))
+        conn.execute(text("DROP TABLE IF EXISTS trusted_devices"))
+        conn.execute(text("DROP TABLE IF EXISTS login_challenges"))

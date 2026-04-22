@@ -45,6 +45,8 @@ class InviteToken(Base):
     user = relationship("User", back_populates="invite_tokens")
 
 
+
+
 class Profile(Base):
     """A candidate profile. Owned by an admin; bidders gain access via ProfileAccess."""
     __tablename__ = "profiles"
@@ -54,6 +56,9 @@ class Profile(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     base_resume_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     daily_target: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    # Per-profile override of the system prompt sent to Claude when tailoring.
+    # NULL → use the global default in tailoring.TAILOR_SYSTEM.
+    tailor_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 

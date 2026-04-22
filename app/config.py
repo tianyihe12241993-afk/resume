@@ -21,6 +21,13 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-secret-change-me")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+# Whether the session cookie should be flagged "Secure" (only sent over HTTPS).
+# Auto-detect from APP_BASE_URL but allow override.
+COOKIE_SECURE = os.getenv(
+    "COOKIE_SECURE", "true" if APP_BASE_URL.startswith("https://") else "false"
+).lower() in ("1", "true", "yes")
+# Max URLs accepted per batch submission (prevents accidental API blow-ups).
+MAX_URLS_PER_BATCH = int(os.getenv("MAX_URLS_PER_BATCH", "200"))
 # Where the user-facing React app lives. In dev this is the Vite dev server on
 # :5173; in prod it's the same origin as the API.
 FRONTEND_URL = os.getenv("FRONTEND_URL", APP_BASE_URL).rstrip("/")
