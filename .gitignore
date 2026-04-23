@@ -3,15 +3,14 @@
 .env.local
 *.env
 
-# --- runtime data (DB, base resumes, generated outputs) ---
-data/
+# --- generated outputs (too large for git, regenerate by retrying batches) ---
+data/outputs/
 output/
 
 # --- built React app (produced by `npm --prefix frontend run build`) ---
 app/static/
 
-# --- personal data (do NOT push) ---
-*.docx
+# --- personal data ---
 jobs.txt
 
 # --- python ---
