@@ -7,11 +7,48 @@
 data/outputs/
 output/
 
+# --- determinism caches (regenerated on demand; safe to delete) ---
+data/jd_spec_cache/
+data/adjacency_cache/
+data/bullet_rewrite_cache/
+data/tailor_cache/
+data/scrape_cache/
+
+# --- the live SQLite DB (contains user accounts + every JD/profile) ---
+data/app.db
+data/*.sqlite
+data/*.sqlite3
+
+# --- personal base resumes; never checked in ---
+data/base_resumes/*.docx
+data/base_resumes/*.txt
+data/base_resumes/*.bak
+
+# --- ad-hoc analysis outputs / drafts ---
+data/*.docx
+data/*.json
+data/*.md
+data/*.txt
+data/*.bak
+
+# --- tailor-studio local state + built frontend ---
+tailor_studio/data/
+tailor_studio/static/
+tailor_studio/web/node_modules/
+tailor_studio/web/dist/
+
+# --- local tools (downloaded standalone binaries) ---
+.tools/
+
+# --- Claude Code session state ---
+.claude/
+
 # --- built React app (produced by `npm --prefix frontend run build`) ---
 app/static/
 
 # --- personal data ---
 jobs.txt
+*.bak
 
 # --- python ---
 __pycache__/
@@ -27,3 +64,4 @@ venv/
 .idea/
 .vscode/
 Thumbs.db
+!data/base_resumes/.gitkeep

@@ -73,6 +73,7 @@ def job_out(j: JobUrl) -> dict:
         "application_note": j.application_note,
         "application_source": j.application_source,
         "has_docx": storage.generated_docx_path(j.batch_id, j.id).exists(),
+        "download_count": j.download_count or 0,
     }
 
 def batch_summary(jobs: list[JobUrl]) -> dict:

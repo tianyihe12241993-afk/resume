@@ -65,7 +65,20 @@ export interface Profile {
   created_at: string
 }
 
-export type JobStatus = 'pending' | 'fetching' | 'tailoring' | 'done' | 'needs_manual_jd' | 'error'
+export type JobStatus = 'pending' | 'fetching' | 'analyzing' | 'tailoring' | 'done' | 'needs_manual_jd' | 'error'
+
+export interface CoverageTerm { term: string; weight: number }
+
+export interface CoverageReport {
+  exact_count: number
+  adjacent_count?: number
+  gap_count: number
+  weighted_coverage: number
+  similarity?: { tf_cosine: number; jaccard: number }
+  covered_exact?: CoverageTerm[]
+  gap?: CoverageTerm[]
+  must_have_phrases?: string[]
+}
 
 export interface Job {
   id: number
@@ -82,6 +95,10 @@ export interface Job {
   application_source?: string | null
   has_docx: boolean
   download_count: number
+  // Constrained-rewrite pipeline outputs (only present after status === 'done').
+  coverage_initial?: CoverageReport | null
+  coverage_final?: CoverageReport | null
+  claimed_terms?: string[]
 }
 
 export interface BatchSummary {

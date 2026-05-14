@@ -111,6 +111,7 @@ def download_batch_zip(
 
     buf = io.BytesIO()
     used: set = set()
+    included_ids: list[int] = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for idx, ju in enumerate(jobs, start=1):
             path = storage.generated_docx_path(ju.batch_id, ju.id)
@@ -123,6 +124,13 @@ def download_batch_zip(
                 name = f"{base}_{n}.docx"; n += 1
             used.add(name)
             zf.write(str(path), arcname=name)
+            included_ids.append(ju.id)
+    if user.role != "admin" and included_ids:
+        db.query(JobUrl).filter(JobUrl.id.in_(included_ids)).update(
+            {JobUrl.download_count: JobUrl.download_count + 1},
+            synchronize_session=False,
+        )
+        db.commit()
     buf.seek(0)
     date_tag = _to_pacific(batch.created_at).strftime("%Y-%m-%d")
     zip_name = _safe_slug(f"{batch.profile.name}_{batch.label or date_tag}") + ".zip"
@@ -154,6 +162,10 @@ def download(
 
     if not path.exists():
         raise HTTPException(404, "File not generated yet.")
+
+    if user.role != "admin" and kind == "docx":
+        ju.download_count = (ju.download_count or 0) + 1
+        db.commit()
 
     friendly = _safe_slug(f"{ju.company or 'Company'}_{ju.title or 'Role'}") + (
         ".docx" if kind == "docx" else ".pdf"

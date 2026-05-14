@@ -101,6 +101,7 @@ def _analyze_structure_with_claude(items: list[tuple[int, str, str]]) -> dict:
     resp = client.messages.create(
         model=config.EXTRACT_MODEL,
         max_tokens=3000,
+        temperature=0,
         system=_STRUCTURE_SYSTEM,
         messages=[{"role": "user", "content": user}],
     )
@@ -332,10 +333,18 @@ def set_paragraph_text(p, new_text: str) -> None:
                     r._element.getparent().remove(r._element)
             return
 
-    # Fallback: majority-wins. Resume bullets typically have a short bold
-    # lead and a long plain body — picking the longest run keeps the body's
-    # formatting, which is what authors want for the bulk of the text.
-    keep = max(runs, key=lambda r: len(r.text or ""))
+    # Fallback. If the original used selective bold for emphasis (some runs
+    # bold, some plain) the whole paragraph is conceptually plain with bold
+    # accents — emphasis can't survive a rewrite, so default to plain. Only
+    # uniformly-bold paragraphs stay bold.
+    text_runs = [r for r in runs if (r.text or "").strip()]
+    if text_runs and all(bool(r.bold) for r in text_runs):
+        keep = max(text_runs, key=lambda r: len(r.text or ""))
+        keep.bold = True
+    else:
+        plain_candidates = [r for r in runs if not bool(r.bold)]
+        keep = max(plain_candidates or runs, key=lambda r: len(r.text or ""))
+        keep.bold = False
     keep.text = new_text
     for r in runs:
         if r is not keep:
@@ -386,6 +395,7 @@ Return <json>{{"company": "...", "title": "...", "location": "...", "description
     resp = client.messages.create(
         model=config.EXTRACT_MODEL,
         max_tokens=2000,
+        temperature=0,
         messages=[{"role": "user", "content": prompt}],
     )
     txt = resp.content[0].text
@@ -395,6 +405,46 @@ Return <json>{{"company": "...", "title": "...", "location": "...", "description
         "title": cleaned.get("title") or raw.get("title", ""),
         "location": cleaned.get("location") or raw.get("location", ""),
         "description": cleaned.get("description") or desc,
+    }
+
+
+def extract_job_info_from_text(jd_text: str) -> dict:
+    """Pull company / title / location from raw pasted JD text using Haiku.
+    Used when the user manually pastes a JD instead of letting the scraper
+    fetch it. Returns {"company": "", "title": "", "location": ""} on
+    failure rather than raising — the manual flow is best-effort.
+    """
+    text = (jd_text or "").strip()
+    if len(text) < 50:
+        return {"company": "", "title": "", "location": ""}
+
+    prompt = (
+        "Extract structured metadata from this raw job description. The text "
+        "may be a partial paste, may include boilerplate or company-about "
+        "sections, and may not have an explicit \"Company:\" or \"Title:\" "
+        "label. Use your judgment. If a field cannot be determined, use an "
+        "empty string.\n\n"
+        f"JD TEXT:\n{text[:12000]}\n\n"
+        'Return <json>{"company": "...", "title": "...", "location": "..."}</json>.'
+    )
+
+    try:
+        client = _client()
+        resp = client.messages.create(
+            model=config.EXTRACT_MODEL,
+            max_tokens=400,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        txt = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+        out = _extract_tagged_json(txt)
+    except Exception:
+        return {"company": "", "title": "", "location": ""}
+
+    return {
+        "company":  (out.get("company")  or "").strip(),
+        "title":    (out.get("title")    or "").strip(),
+        "location": (out.get("location") or "").strip(),
     }
 
 
@@ -466,11 +516,16 @@ XML RULES:
 
 
 
+_TAILOR_CACHE_DIR = config.DATA_DIR / "tailor_cache"
+_tailor_mem_cache: dict[str, dict] = {}
+
+
 def tailor_resume(
     resume: ResumeStruct, job: dict, *, system_prompt: Optional[str] = None
 ) -> dict:
     """Tailor `resume` for `job`. If `system_prompt` is non-empty, override
-    the global default."""
+    the global default. Cached on disk by hash of (resume, job, system_prompt).
+    """
     client = _client()
     sys_prompt = (system_prompt or "").strip() or TAILOR_SYSTEM
 
@@ -493,6 +548,28 @@ def tailor_resume(
             f"<items>{_xml_escape(s.items.strip())}</items></skill>"
         )
     resume_xml = "\n".join(input_parts)
+
+    cache_blob = json.dumps({
+        "model": config.TAILOR_MODEL,
+        "system": sys_prompt,
+        "resume_xml": resume_xml,
+        "company": job.get("company", ""),
+        "title": job.get("title", ""),
+        "location": job.get("location", ""),
+        "description": (job.get("description") or "")[:15000],
+    }, ensure_ascii=False, sort_keys=True)
+    cache_key = hashlib.sha256(cache_blob.encode("utf-8")).hexdigest()
+    cached = _tailor_mem_cache.get(cache_key)
+    if cached is None:
+        cache_path = _TAILOR_CACHE_DIR / f"{cache_key}.json"
+        if cache_path.exists():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                _tailor_mem_cache[cache_key] = cached
+            except (OSError, json.JSONDecodeError):
+                cached = None
+    if cached is not None:
+        return cached
 
     user_msg = [
         {
@@ -534,6 +611,16 @@ def tailor_resume(
     out = _parse_xml_output(text, resume)
     _repair_output(out, resume)
     _validate_tailored(out, resume)
+
+    _tailor_mem_cache[cache_key] = out
+    try:
+        _TAILOR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        (_TAILOR_CACHE_DIR / f"{cache_key}.json").write_text(
+            json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
     return out
 
 
@@ -640,8 +727,9 @@ def _repair_output(out: dict, resume: ResumeStruct) -> None:
     if resume.skills:
         sc = list(out.get("skill_categories") or [])
         si = list(out.get("skill_items") or [])
-        # Make both lists equal in length first (trim one if mismatched).
-        n = min(len(sc), len(si))
+        # Trim to len(resume.skills) so the model can't overshoot the layout —
+        # also keeps sc/si the same length when one is longer than the other.
+        n = min(len(sc), len(si), len(resume.skills))
         sc, si = sc[:n], si[:n]
         if len(sc) < len(resume.skills):
             have = {str(c).strip().lower() for c in sc}

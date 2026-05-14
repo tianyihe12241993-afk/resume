@@ -123,6 +123,9 @@ class JobUrl(Base):
     docx_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     pdf_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
+    # Number of bidder-initiated downloads (admin downloads don't count).
+    download_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
     # Application-funnel status (orthogonal to pipeline status above).
     # Values: new | applied | interview | rejected | offer
     application_status: Mapped[str] = mapped_column(

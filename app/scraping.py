@@ -368,11 +368,97 @@ def _extract_from_html(html: str, fallback_company: str = "") -> dict:
     }
 
 
-def fetch_job_posting(url: str) -> dict:
+def _haiku_extract_from_html(html: str, url: str) -> Optional[dict]:
+    """Last-ditch fallback: ask Haiku to pull the JD out of raw HTML.
+
+    Useful for ATS pages where the job content is hiding in a script tag,
+    a non-standard JSON-LD shape, an embedded data island, or a place our
+    heuristic selectors didn't anticipate. For pure JS-only SPAs whose
+    response body has no JD content at all (Gem, ADP, Metacareers...),
+    Haiku returns empty and we still fall through to needs_manual_jd.
+
+    Returns {"company","title","location","description"} on success or
+    None on failure. Never raises — best-effort only.
+    """
+    if not html or len(html) < 500:
+        return None
+
+    # Strip <style> entirely (no signal) and trim <script> tags but keep their
+    # text content so embedded JSON state survives. Cap at ~30K chars going
+    # to Haiku — we only need enough for it to find the JD pattern.
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["style", "noscript", "svg", "iframe", "link"]):
+        tag.decompose()
+    cleaned_html = str(soup)
+    if len(cleaned_html) > 30_000:
+        cleaned_html = cleaned_html[:30_000]
+
+    try:
+        # Lazy import to avoid pulling Anthropic into hot path when unused.
+        from . import config
+        from anthropic import Anthropic
+        if not config.ANTHROPIC_API_KEY:
+            return None
+        client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        prompt = (
+            "Extract a job posting from this raw HTML. The content may be in a "
+            "script tag with embedded JSON, a JSON-LD block, hidden meta tags, "
+            "or page text — find it wherever it lives. If the HTML is just a "
+            "JS shell with no real JD content, return empty strings.\n\n"
+            f"URL: {url}\n\n"
+            f"HTML:\n{cleaned_html}\n\n"
+            'Return <json>{"company": "...", "title": "...", "location": "...", '
+            '"description": "..."}</json>. The description should be the full job '
+            "text, plain (entities decoded), no HTML tags."
+        )
+        resp = client.messages.create(
+            model=config.EXTRACT_MODEL,
+            max_tokens=4000,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+        m = re.search(r"<json>\s*(\{.*?\})\s*</json>", text, re.DOTALL) \
+            or re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL) \
+            or re.search(r"(\{.*\})", text, re.DOTALL)
+        if not m:
+            return None
+        data = _json.loads(m.group(1))
+    except Exception:
+        return None
+
+    desc = (data.get("description") or "").strip()
+    if len(desc) < 200:
+        return None  # Haiku also gave up — fall through to needs_manual_jd
+    return {
+        "company":  (data.get("company")  or "").strip(),
+        "title":    (data.get("title")    or "").strip(),
+        "location": (data.get("location") or "").strip(),
+        "description": desc,
+    }
+
+
+def fetch_job_posting(url: str, *, bypass_cache: bool = False) -> dict:
     """Return {company, title, location, description}.
+
+    Results are cached on disk for 7 days (see app/scrape_cache.py). Pass
+    bypass_cache=True to force a fresh network fetch — e.g. when a user
+    explicitly requests a re-scrape because the cached JD looks wrong.
 
     Raises RuntimeError on fetch failure.
     """
+    from . import scrape_cache
+
+    if not bypass_cache:
+        hit = scrape_cache.get(url)
+        if hit is not None:
+            return hit
+    info = _fetch_job_posting_uncached(url)
+    scrape_cache.put(url, info)
+    return info
+
+
+def _fetch_job_posting_uncached(url: str) -> dict:
     host = urlparse(url).netloc.lower()
 
     if "ashbyhq.com" in host:
@@ -422,11 +508,26 @@ def fetch_job_posting(url: str) -> dict:
             return info
 
     last_err: Optional[Exception] = None
+    last_html: Optional[str] = None
+    last_url_used: Optional[str] = None
     for u in candidates:
         try:
             r = _get(u)
             if r.status_code == 200 and len(r.text) > 500:
-                return _extract_from_html(r.text)
+                info = _extract_from_html(r.text)
+                # Description is "real" if we got >= 400 chars from heuristic
+                # extraction. Otherwise stash the HTML for the Haiku fallback.
+                if len(info.get("description") or "") >= 400:
+                    return info
+                last_html = r.text
+                last_url_used = u
         except Exception as e:
             last_err = e
+
+    # Last-ditch: Haiku reads the raw HTML and tries to find embedded JD.
+    if last_html:
+        haiku_info = _haiku_extract_from_html(last_html, last_url_used or url)
+        if haiku_info and haiku_info.get("description"):
+            return haiku_info
+
     raise RuntimeError(f"Could not fetch job page: {url} ({last_err})")

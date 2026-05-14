@@ -54,6 +54,7 @@ def _run_lightweight_migrations() -> None:
         ("profiles", "tailor_prompt", "TEXT"),
         ("job_urls", "application_source", "VARCHAR(32)"),
         ("job_urls", "application_evidence", "VARCHAR(255)"),
+        ("job_urls", "download_count", "INTEGER NOT NULL DEFAULT 0"),
     ]
     with engine.begin() as conn:
         for table, col, decl in migrations:

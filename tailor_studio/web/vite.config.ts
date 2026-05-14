@@ -8,15 +8,15 @@ export default defineConfig({
     alias: { '@': path.resolve(__dirname, './src') },
   },
   server: {
-    port: 5173,
+    port: 5174,
     allowedHosts: ['.trycloudflare.com'],
     proxy: {
-      '/api':      { target: 'http://127.0.0.1:8000', changeOrigin: true },
-      '/download': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+      '/api':      { target: 'http://127.0.0.1:8001', changeOrigin: true },
+      '/download': { target: 'http://127.0.0.1:8001', changeOrigin: true },
     },
   },
   build: {
-    outDir: '../app/static',
+    outDir: '../static',
     emptyOutDir: true,
   },
 })
