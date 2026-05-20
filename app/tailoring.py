@@ -404,6 +404,7 @@ Return <json>{{"company": "...", "title": "...", "location": "...", "description
         "company": cleaned.get("company") or raw.get("company", ""),
         "title": cleaned.get("title") or raw.get("title", ""),
         "location": cleaned.get("location") or raw.get("location", ""),
+        "work_type": raw.get("work_type"),
         "description": cleaned.get("description") or desc,
     }
 

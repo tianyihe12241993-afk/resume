@@ -2,12 +2,12 @@ import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  ChevronLeft, ChevronDown, ChevronRight, Download, ExternalLink,
-  Target, RotateCw, Sparkles,
+  ChevronLeft, Download, ExternalLink, RotateCw, MessageSquare,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { api, type BatchDetail, type Job } from '@/lib/api'
-import { Alert, Chip, Progress } from '@/components/ui'
+import { Alert, Progress } from '@/components/ui'
+import { StatusOrb, rowTintForStatus } from '@/components/charts'
 import { formatDateTime } from '@/lib/format'
 
 export default function BatchDetailPage() {
@@ -39,18 +39,26 @@ export default function BatchDetailPage() {
       alert(`Couldn't update status: ${(e as Error).message || 'unknown error'}`)
     },
   })
+  const reapply = useMutation({
+    mutationFn: (jid: number) => api.post(`/api/admin/batches/${bid}/jobs/${jid}/reapply`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/batch', bid] }),
+  })
 
   const [manualJob, setManualJob] = useState<Job | null>(null)
-  const [expanded, setExpanded] = useState<Set<number>>(new Set())
-  const toggleExpand = (id: number) =>
-    setExpanded((s) => {
-      const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n
-    })
+  const [noteJob, setNoteJob] = useState<Job | null>(null)
 
-  const claim = useMutation({
-    mutationFn: ({ jid, terms }: { jid: number; terms: string[] }) =>
-      api.post(`/api/admin/batches/${bid}/jobs/${jid}/claim`, { terms }),
+  const saveNote = useMutation({
+    mutationFn: ({ jid, text }: { jid: number; text: string }) =>
+      api.post(`/api/admin/batches/${bid}/jobs/${jid}/note`, { text }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/batch', bid] }),
+  })
+  const markNoteSeen = useMutation({
+    mutationFn: (jid: number) =>
+      api.post(`/api/admin/batches/${bid}/jobs/${jid}/note/seen`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin/batch', bid] })
+      qc.invalidateQueries({ queryKey: ['admin/notes/unread'] })
+    },
   })
 
   if (!data) return <div className="text-center text-gray-400 text-sm">Loading…</div>
@@ -68,46 +76,30 @@ export default function BatchDetailPage() {
         <p className="text-sm text-gray-400 mt-0.5">{profile.name} · batch #{batch.id}</p>
       </div>
 
-      {/* progress: applied vs target */}
-      <div className="card p-5 mb-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <Target className="w-4 h-4 text-brand-500" />
-              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                Applied / Tailored
-              </span>
-            </div>
-            <div className="flex items-baseline gap-2 mb-2">
-              <span className={clsx('text-3xl font-bold tabular-nums',
-                summary.done > 0 && summary.applied >= summary.done ? 'text-green-600' : 'text-brand-600')}>
-                {summary.applied}
-              </span>
-              <span className="text-gray-400">/ {summary.done}</span>
-              <span className="ml-auto text-sm text-gray-500">{summary.applied_percent}%</span>
-            </div>
-            <Progress
-              percent={Math.min(100, summary.applied_percent)}
-              color={summary.done > 0 && summary.applied >= summary.done ? 'green' : 'blue'}
-            />
+      {/* Slim metric strip — single row of numbers + a 4px progress bar */}
+      <div className="card px-4 py-2.5 mb-4">
+        <div className="flex items-center gap-5 text-sm flex-wrap">
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-xs uppercase tracking-wider text-gray-400 font-semibold">Tailored</span>
+            <span className="font-bold tabular-nums text-gray-800">{summary.done}</span>
+            <span className="text-gray-300">/ {summary.total}</span>
           </div>
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Queue</span>
-            </div>
-            <div className="flex items-baseline gap-2 mb-2">
-              <span className="text-3xl font-bold text-green-600 tabular-nums">{summary.done}</span>
-              <span className="text-gray-400">/ {summary.total}</span>
-              <span className="ml-auto text-sm text-gray-500">{summary.percent}%</span>
-            </div>
-            <Progress percent={summary.percent} color="green" />
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-xs uppercase tracking-wider text-gray-400 font-semibold">Applied</span>
+            <span className={clsx('font-bold tabular-nums',
+              summary.done > 0 && summary.applied >= summary.done ? 'text-green-600' : 'text-brand-600')}>
+              {summary.applied}
+            </span>
+            <span className="text-gray-300">/ {summary.done}</span>
+          </div>
+          <div className="flex items-center gap-2 ml-auto flex-wrap">
+            {summary.in_flight > 0 && <span className="chip chip-tailoring">{summary.in_flight} in progress</span>}
+            {summary.needs_jd > 0 && <span className="chip chip-needs_manual_jd">{summary.needs_jd} need JD</span>}
+            {summary.errors > 0 && <span className="chip chip-error">{summary.errors} errors</span>}
           </div>
         </div>
-        <div className="mt-4 flex flex-wrap gap-2">
-          {summary.in_flight > 0 && <span className="chip chip-tailoring">{summary.in_flight} in progress</span>}
-          {summary.needs_jd > 0 && <span className="chip chip-needs_manual_jd">{summary.needs_jd} need JD</span>}
-          {summary.errors > 0 && <span className="chip chip-error">{summary.errors} errors</span>}
-          {summary.done > 0 && <span className="chip chip-done">{summary.done} done</span>}
+        <div className="mt-2 -mx-1">
+          <Progress percent={summary.percent} color="green" />
         </div>
       </div>
 
@@ -133,36 +125,30 @@ export default function BatchDetailPage() {
           <table className="w-full text-sm table-fixed">
             <thead className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
               <tr className="text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
-                <Th className="w-7"> </Th>
-                <Th className="w-10 text-center">#</Th>
-                <Th className="w-[90px]">Status</Th>
-                <Th className="w-[110px]">Application</Th>
-                <Th className="w-[170px]">Company</Th>
-                <Th>Title</Th>
-                <Th className="w-[110px]">Coverage</Th>
-                <Th className="w-[150px]">Location</Th>
-                <Th className="w-[110px]">URL</Th>
-                <Th className="w-[140px] text-center">Resume</Th>
-                <Th className="w-[50px] text-center">Action</Th>
+                <Th className="w-[60px] text-center">Status</Th>
+                <Th>Job</Th>
+                <Th className="w-[110px] text-center">Open JD</Th>
+                <Th className="w-[260px]">Application</Th>
+                <Th className="w-[200px] text-center">Actions</Th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {jobs.map((j, i) => (
+              {jobs.map((j) => (
                 <AdminRow
                   key={j.id}
                   job={j}
-                  index={i + 1}
-                  expanded={expanded.has(j.id)}
-                  onToggleExpand={() => toggleExpand(j.id)}
                   onRetry={() => retry.mutate(j.id)}
                   onAppStatus={(status) => setAppStatus.mutate({ jid: j.id, status })}
+                  onReapply={() => reapply.mutate(j.id)}
                   onNeedsJd={() => setManualJob(j)}
-                  onClaim={(terms) => claim.mutate({ jid: j.id, terms })}
-                  claimPending={claim.isPending}
+                  onOpenNote={() => {
+                    setNoteJob(j)
+                    if (j.has_unread_note) markNoteSeen.mutate(j.id)
+                  }}
                 />
               ))}
               {jobs.length === 0 && (
-                <tr><td colSpan={11} className="p-10 text-center text-sm text-gray-400">No jobs yet.</td></tr>
+                <tr><td colSpan={5} className="p-10 text-center text-sm text-gray-400">No jobs yet.</td></tr>
               )}
             </tbody>
           </table>
@@ -176,6 +162,16 @@ export default function BatchDetailPage() {
           onClose={() => setManualJob(null)}
         />
       )}
+      {noteJob && (
+        <NoteDialog
+          job={noteJob}
+          onClose={() => setNoteJob(null)}
+          onSave={(text) => saveNote.mutate({ jid: noteJob.id, text }, {
+            onSuccess: () => setNoteJob(null),
+          })}
+          pending={saveNote.isPending}
+        />
+      )}
     </>
   )
 }
@@ -184,158 +180,209 @@ function Th({ className, children }: { className?: string; children: React.React
   return <th className={clsx('px-3 py-2.5 font-semibold', className)}>{children}</th>
 }
 
-function AdminRow({
-  index, job, expanded, onToggleExpand, onRetry, onAppStatus, onNeedsJd,
-  onClaim, claimPending,
+function UploadVerdictPill({
+  match, filename, observedAt,
 }: {
-  index: number; job: Job
-  expanded: boolean
-  onToggleExpand: () => void
+  match: 'tailored' | 'base' | 'other' | null | undefined
+  filename?: string | null
+  observedAt?: string | null
+}) {
+  if (!match) {
+    // Show an explicit "no upload observed" placeholder so the user always
+    // knows whether the audit is missing or it just hasn't happened.
+    return (
+      <span
+        className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-dashed border-gray-300 text-[11px] text-gray-400"
+        title="The extension didn't see a file uploaded for this job yet."
+      >
+        <span className="w-2 h-2 rounded-full bg-gray-300" />
+        Upload not yet observed
+      </span>
+    )
+  }
+  const meta = match === 'tailored'
+    ? { dot: 'bg-emerald-500', cls: 'bg-emerald-50 text-emerald-800 border-emerald-200', label: 'Tailored uploaded' }
+    : match === 'base'
+    ? { dot: 'bg-amber-500',   cls: 'bg-amber-50   text-amber-800   border-amber-200',   label: 'Base resume uploaded' }
+    : { dot: 'bg-rose-500',    cls: 'bg-rose-50    text-rose-800    border-rose-200',    label: 'Different file uploaded' }
+  const fname = filename || '(unknown filename)'
+  const tooltip = observedAt
+    ? `${meta.label}: ${fname}\nObserved ${new Date(observedAt).toLocaleString()}`
+    : `${meta.label}: ${fname}`
+  return (
+    <span
+      title={tooltip}
+      className={clsx(
+        'inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] font-medium max-w-full',
+        meta.cls,
+      )}
+    >
+      <span className={clsx('w-2 h-2 rounded-full flex-shrink-0', meta.dot)} />
+      <span className="font-semibold whitespace-nowrap">{meta.label}</span>
+      <span className="opacity-60 truncate" title={fname}>· {fname}</span>
+    </span>
+  )
+}
+
+
+function WorkTypeBadge({ value }: { value: 'remote' | 'hybrid' | 'onsite' | null | undefined }) {
+  if (!value) return null
+  const cls = value === 'remote'
+    ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
+    : value === 'hybrid'
+    ? 'bg-amber-100 text-amber-700 border-amber-200'
+    : 'bg-rose-100 text-rose-700 border-rose-200'
+  const label = value[0].toUpperCase() + value.slice(1)
+  return (
+    <span className={clsx(
+      'inline-flex items-center px-1.5 py-0.5 mr-1.5 rounded border text-[10px] font-semibold uppercase tracking-wide align-middle',
+      cls,
+    )} title={`Work type: ${label}`}>
+      {label}
+    </span>
+  )
+}
+
+function AdminRow({
+  job, onRetry, onAppStatus, onReapply, onNeedsJd, onOpenNote,
+}: {
+  job: Job
   onRetry: () => void
   onAppStatus: (status: string) => void
+  onReapply: () => void
   onNeedsJd: () => void
-  onClaim: (terms: string[]) => void
-  claimPending: boolean
+  onOpenNote: () => void
 }) {
   const isDone = job.status === 'done'
   const needsJd = job.status === 'needs_manual_jd'
-  const hasReport = isDone && job.coverage_final
   return (
-    <>
-      <tr className={clsx(
-        'hover:bg-slate-50/80 transition group',
-        expanded && 'bg-brand-50/40',
-      )}>
-        <td className="px-1 py-2 text-center">
-          <button
-            onClick={onToggleExpand}
-            disabled={!hasReport}
-            title={hasReport ? (expanded ? 'Collapse' : 'Show coverage report') : 'No report yet'}
-            className={clsx(
-              'p-0.5 rounded',
-              hasReport
-                ? 'text-gray-400 hover:text-brand-600 hover:bg-brand-50'
-                : 'text-gray-200 cursor-not-allowed',
-            )}
-          >
-            {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-          </button>
-        </td>
-        <td className="px-3 py-2 text-center text-xs text-gray-400 tabular-nums">{index}</td>
-        <td className="px-3 py-2"><Chip status={job.status} /></td>
-        <td className="px-3 py-2">
+    <tr className={clsx(
+      'hover:bg-slate-50/80 transition group',
+      rowTintForStatus(job.status),
+    )}>
+      {/* status — colored orb */}
+      <td className="px-3 py-3 align-top text-center">
+        <StatusOrb status={job.status} size={28} />
+      </td>
+
+      {/* job: company / title / [work_type, location, coverage chip] */}
+      <td className="px-3 py-3 align-top">
+        <div className="font-semibold text-gray-900 truncate" title={job.company || ''}>
+          {job.company || <span className="text-gray-300">(no company)</span>}
+        </div>
+        <div className="text-gray-700 truncate" title={job.title || ''}>
+          {job.title || <span className="text-gray-300">(no title)</span>}
+        </div>
+        <div className="flex items-center gap-2 mt-1.5 text-xs text-gray-500 flex-wrap">
+          <WorkTypeBadge value={job.work_type} />
+          {job.location && <span className="truncate" title={job.location}>{job.location}</span>}
+          <CoverageInlineChip job={job} />
+        </div>
+        {job.error_message && (
+          <p className="text-[11px] text-red-700 mt-1.5 line-clamp-2 bg-red-50 border border-red-200 rounded px-1.5 py-0.5" title={job.error_message}>
+            {job.error_message}
+          </p>
+        )}
+      </td>
+
+      {/* JD: dedicated prominent open-link column */}
+      <td className="px-3 py-3 align-top">
+        <a href={job.url} target="_blank" rel="noopener noreferrer"
+           title={job.url}
+           className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-semibold text-brand-700 bg-brand-50 hover:bg-brand-100 border border-brand-200 rounded-md transition">
+          <ExternalLink className="w-4 h-4" /> Open
+        </a>
+      </td>
+
+      {/* application: properly-sized select + prominent verdict pill */}
+      <td className="px-3 py-3 align-top">
+        <div className="flex flex-col gap-1.5">
           <AppStatusSelect
             value={job.application_status || 'not_yet'}
             disabled={!isDone}
             onChange={onAppStatus}
           />
-        </td>
-        <td className="px-3 py-2 text-gray-900 truncate" title={job.company || ''}>
-          {job.company || <span className="text-gray-300">—</span>}
-        </td>
-        <td className="px-3 py-2 text-gray-900 truncate" title={job.title || ''}>
-          {job.title || <span className="text-gray-300">—</span>}
-        </td>
-        <td className="px-3 py-2">
-          <CoverageCell job={job} onClick={onToggleExpand} />
-        </td>
-        <td className="px-3 py-2 text-gray-500 text-xs break-words" title={job.location || ''}>
-          {job.location || <span className="text-gray-300">—</span>}
-        </td>
-        <td className="px-3 py-2">
-          <a href={job.url} target="_blank" rel="noopener noreferrer"
-             className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold text-gray-700 bg-white border border-gray-300 hover:bg-gray-50 hover:border-gray-400 rounded transition"
-             title={job.url}>
-            <ExternalLink className="w-3 h-3" /> Open
-          </a>
-          {job.error_message && <p className="text-[11px] text-red-600 mt-0.5 truncate" title={job.error_message}>{job.error_message}</p>}
-        </td>
-        <td className="px-3 py-2 text-center">
+          <AppliedMeta job={job} onReapply={onReapply} />
+          <UploadVerdictPill
+            match={job.upload_match}
+            filename={job.upload_filename}
+            observedAt={job.upload_observed_at}
+          />
+        </div>
+      </td>
+
+      {/* actions: docx / pdf / Note / Edit JD */}
+      <td className="px-3 py-3 align-top">
+        <div className="flex items-center justify-center gap-1.5 flex-wrap">
           {isDone && job.has_docx ? (
-            <div className="inline-flex items-center gap-1">
-              {job.download_count > 0 && (
-                <span
-                  title={`Downloaded ${job.download_count} time${job.download_count === 1 ? '' : 's'}`}
-                  className="inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full bg-slate-200 text-slate-700 text-[10px] font-semibold tabular-nums"
-                >{job.download_count}</span>
-              )}
+            <>
               <a href={`/download/${job.id}/docx`}
                  title="Download .docx"
-                 className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded transition shadow-sm"
-              ><Download className="w-3 h-3" /> docx</a>
+                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-md transition shadow-sm">
+                <Download className="w-3.5 h-3.5" /> .docx
+              </a>
               <a href={`/download/${job.id}/pdf`}
                  title="Download .pdf (generated on first click)"
-                 className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded transition"
-              >pdf</a>
-            </div>
-          ) : <span className="text-gray-300 text-xs">—</span>}
-        </td>
-        <td className="px-3 py-2 text-center">
-          <div className="inline-flex items-center gap-1">
-            {(needsJd || job.status === 'error' || isDone) && (
-              <button
-                onClick={onNeedsJd}
-                title={
-                  needsJd ? 'Paste the job description manually' :
-                  job.status === 'error' ? 'Edit JD and re-run' :
-                  'Edit JD and re-tailor'
-                }
-                className={clsx(
-                  'text-xs font-medium px-2 py-1 rounded transition',
-                  needsJd
-                    ? 'text-amber-700 hover:text-amber-900 hover:bg-amber-50'
-                    : job.status === 'error'
-                    ? 'text-red-700 hover:text-red-900 hover:bg-red-50'
-                    : 'text-gray-400 hover:text-brand-600 hover:bg-brand-50',
-                )}
-              >
-                {needsJd ? 'Paste JD' : job.status === 'error' ? 'Fix JD' : 'Edit JD'}
-              </button>
-            )}
-            {(job.status === 'error' || isDone) && (
-              <button
-                onClick={onRetry}
-                title="Re-run tailoring with the existing JD"
-                className="text-gray-300 hover:text-gray-600 hover:bg-slate-100 rounded p-1 transition"
-              >
-                <RotateCw className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-        </td>
-      </tr>
-      {expanded && hasReport && (
-        <tr>
-          <td colSpan={11} className="px-6 py-4 bg-slate-50/60 border-y border-slate-200">
-            <CoveragePanel
-              job={job}
-              onClaim={onClaim}
-              claimPending={claimPending}
-            />
-          </td>
-        </tr>
-      )}
-    </>
+                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-md transition">
+                .pdf
+              </a>
+            </>
+          ) : isDone && !job.has_docx ? (
+            <button
+              onClick={onRetry}
+              title="Resume file was pruned. Re-tailor and regenerate the .docx."
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-brand-700 bg-brand-50 hover:bg-brand-100 border border-brand-200 rounded-md transition"
+            >
+              <RotateCw className="w-3.5 h-3.5" /> Re-tailor
+            </button>
+          ) : null}
+          <NoteButton job={job} onClick={onOpenNote} />
+          {(needsJd || job.status === 'error' || isDone) && (
+            <button
+              onClick={onNeedsJd}
+              title={
+                needsJd ? 'Paste the job description manually' :
+                job.status === 'error' ? 'Edit JD and re-run' :
+                'Edit JD and re-tailor'
+              }
+              className={clsx(
+                'inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-md transition border',
+                needsJd
+                  ? 'text-amber-700 bg-amber-50 hover:bg-amber-100 border-amber-200'
+                  : job.status === 'error'
+                  ? 'text-red-700 bg-red-50 hover:bg-red-100 border-red-200'
+                  : 'text-gray-600 bg-white hover:bg-slate-50 border-gray-300',
+              )}
+            >
+              {needsJd ? 'Paste JD' : job.status === 'error' ? 'Fix JD' : 'Edit JD'}
+            </button>
+          )}
+        </div>
+      </td>
+    </tr>
   )
 }
 
 const APP_STATUS_OPTIONS: { v: string; t: string }[] = [
-  { v: 'not_yet',    t: '— not yet' },
-  { v: 'applied',    t: '✓ applied' },
-  { v: 'error',      t: '✕ error' },
-  { v: 'not_remote', t: '⊘ not remote' },
+  { v: 'not_yet',     t: '— not yet' },
+  { v: 'applied',     t: '✓ applied' },
+  { v: 'error',       t: '✕ error' },
+  { v: 'not_remote',  t: '⊘ not remote' },
+  { v: 'unavailable', t: '⌫ unavailable' },
 ]
 
 function AppStatusSelect({
   value, disabled, onChange,
 }: { value: string; disabled?: boolean; onChange: (v: string) => void }) {
-  // Color-code the picker so the row reads at a glance.
+  // Properly button-sized so the click target reads as the primary action
+  // in the row, not an afterthought.
   const cls = clsx(
-    'text-xs font-medium border rounded px-1.5 py-0.5 cursor-pointer focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-40',
-    value === 'applied'    && 'bg-green-50  text-green-800  border-green-200',
-    value === 'error'      && 'bg-red-50    text-red-800    border-red-200',
-    value === 'not_remote' && 'bg-slate-100 text-slate-700  border-slate-300',
-    (value === 'not_yet' || !value) && 'bg-white text-gray-500 border-gray-300',
+    'w-full text-sm font-medium border-2 rounded-md px-2.5 py-1.5 cursor-pointer focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-40 transition',
+    value === 'applied'     && 'bg-green-50  text-green-800  border-green-300',
+    value === 'error'       && 'bg-red-50    text-red-800    border-red-300',
+    value === 'not_remote'  && 'bg-slate-100 text-slate-700  border-slate-300',
+    value === 'unavailable' && 'bg-amber-50  text-amber-800  border-amber-300',
+    (value === 'not_yet' || !value) && 'bg-white text-gray-600 border-gray-300 hover:border-brand-300',
   )
   return (
     <select
@@ -352,173 +399,176 @@ function AppStatusSelect({
   )
 }
 
-function CoverageCell({ job, onClick }: { job: Job; onClick: () => void }) {
-  const cf = job.coverage_final
-  const ci = job.coverage_initial
-  if (!cf) return <span className="text-gray-300 text-xs">—</span>
-  const fmtPct = (v: number) => Math.round(v * 100) + '%'
-  const finalCov = fmtPct(cf.weighted_coverage)
-  const initialCov = ci ? fmtPct(ci.weighted_coverage) : null
-  const finalSim = cf.similarity ? fmtPct(cf.similarity.tf_cosine) : null
+
+function NoteButton({ job, onClick }: { job: Job; onClick: () => void }) {
+  const hasNote = !!(job.note && job.note.trim())
+  const unread = !!job.has_unread_note
   return (
     <button
       onClick={onClick}
-      className="text-left flex flex-col gap-0.5 hover:bg-brand-50 rounded px-1.5 py-1 transition"
-      title="Click to expand the full coverage report"
+      title={unread ? 'Unread note — click to read' :
+             hasNote ? 'View / edit collaboration note' :
+                       'Leave a note for the co-worker'}
+      className={clsx(
+        'relative inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md border transition',
+        unread
+          ? 'text-rose-700 bg-rose-50 border-rose-300 hover:bg-rose-100 animate-pulse'
+          : hasNote
+          ? 'text-indigo-700 bg-indigo-50 border-indigo-200 hover:bg-indigo-100'
+          : 'text-gray-600 bg-white border-gray-300 hover:bg-slate-50',
+      )}
     >
-      <span className="text-xs font-semibold text-gray-700 tabular-nums flex items-center gap-1">
-        <Sparkles className="w-3 h-3 text-brand-500" />
-        {finalCov}
-        {initialCov && initialCov !== finalCov && (
-          <span className="text-gray-400 font-normal text-[10px]">↑ {initialCov}</span>
-        )}
-      </span>
-      {finalSim && (
-        <span className="text-[10px] text-gray-400 tabular-nums">sim {finalSim}</span>
+      <MessageSquare className="w-3.5 h-3.5" />
+      Note
+      {unread && (
+        <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-rose-500 ring-2 ring-white" />
       )}
     </button>
   )
 }
 
-function CoveragePanel({
-  job, onClaim, claimPending,
-}: { job: Job; onClaim: (terms: string[]) => void; claimPending: boolean }) {
-  const cf = job.coverage_final!
-  const ci = job.coverage_initial
-  const claimedSet = new Set(job.claimed_terms || [])
-  const [staged, setStaged] = useState<Set<string>>(new Set(claimedSet))
-  const fmtPct = (v: number | null | undefined) =>
-    v == null ? '—' : (v * 100).toFixed(1) + '%'
 
-  const dirty =
-    staged.size !== claimedSet.size ||
-    [...staged].some((t) => !claimedSet.has(t))
-
-  const toggle = (term: string) => {
-    setStaged((s) => {
-      const n = new Set(s); n.has(term) ? n.delete(term) : n.add(term); return n
-    })
-  }
-
+function NoteDialog({
+  job, onClose, onSave, pending,
+}: {
+  job: Job
+  onClose: () => void
+  onSave: (text: string) => void
+  pending: boolean
+}) {
+  const [text, setText] = useState(job.note || '')
+  const dirty = (job.note || '') !== text
+  const lastUpdated = job.note_updated_at ? new Date(job.note_updated_at) : null
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 text-sm">
-      {/* Metrics column */}
-      <div>
-        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-          Metrics
-        </h4>
-        <ul className="space-y-1.5 text-xs">
-          <Metric label="JD-weighted coverage"
-                  current={fmtPct(cf.weighted_coverage)}
-                  prev={ci ? fmtPct(ci.weighted_coverage) : null} />
-          <Metric label="Lexical similarity (TF cos)"
-                  current={fmtPct(cf.similarity?.tf_cosine)}
-                  prev={fmtPct(ci?.similarity?.tf_cosine)} />
-          <Metric label="Token overlap (Jaccard)"
-                  current={fmtPct(cf.similarity?.jaccard)}
-                  prev={fmtPct(ci?.similarity?.jaccard)} />
-          <Metric label="Exact-match terms"
-                  current={String(cf.exact_count)}
-                  prev={ci ? String(ci.exact_count) : null} />
-          <Metric label="Gap terms"
-                  current={String(cf.gap_count)}
-                  prev={ci ? String(ci.gap_count) : null} />
-        </ul>
-      </div>
-
-      {/* Covered terms */}
-      <div>
-        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-          In your tailored resume verbatim
-        </h4>
-        {(cf.covered_exact || []).length > 0 ? (
-          <div className="flex flex-wrap gap-1">
-            {cf.covered_exact!.map((c) => (
-              <span key={c.term} title={`weight ${c.weight.toFixed(2)}`}
-                    className="text-[11px] px-1.5 py-0.5 rounded bg-green-100 text-green-800">
-                {c.term}
-              </span>
-            ))}
-          </div>
-        ) : (
-          <p className="text-xs text-gray-400 italic">No exact JD-term matches yet.</p>
-        )}
-      </div>
-
-      {/* Gap claim */}
-      <div>
-        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-          Still gaps — tick what you can defend
-        </h4>
-        {(cf.gap || []).length > 0 ? (
-          <>
-            <div className="flex flex-col gap-1 max-h-44 overflow-y-auto pr-1">
-              {cf.gap!.map((g) => (
-                <label key={g.term} className="inline-flex items-center gap-1.5 text-xs cursor-pointer">
-                  <input type="checkbox" checked={staged.has(g.term)}
-                         onChange={() => toggle(g.term)}
-                         className="w-3.5 h-3.5 rounded border-gray-300" />
-                  <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-800"
-                        title={`weight ${g.weight.toFixed(2)}`}>
-                    {g.term}
-                  </span>
-                </label>
-              ))}
-            </div>
-            <button
-              disabled={!dirty || claimPending}
-              onClick={() => onClaim([...staged])}
-              className={clsx(
-                'mt-2 text-xs font-medium px-2.5 py-1 rounded transition',
-                dirty
-                  ? 'bg-brand-600 text-white hover:bg-brand-700'
-                  : 'bg-gray-100 text-gray-400 cursor-not-allowed',
-              )}
-            >
-              {claimPending ? 'Rebuilding…'
-                : dirty ? `Apply ${staged.size} claim${staged.size === 1 ? '' : 's'}`
-                : 'No changes'}
-            </button>
-            <p className="text-[10px] text-gray-400 mt-1.5 leading-tight">
-              Claimed terms get appended to the appropriate skill row and the .docx is rebuilt.
+    <div className="fixed inset-0 z-50 bg-black/40 grid place-items-center p-4" onClick={onClose}>
+      <div className="card w-full max-w-xl p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between mb-3">
+          <div className="min-w-0">
+            <h3 className="font-semibold text-gray-900 text-lg flex items-center gap-2">
+              <MessageSquare className="w-5 h-5 text-indigo-500" /> Collaboration note
+            </h3>
+            <p className="text-xs text-gray-500 mt-0.5 truncate">
+              {job.company && <span className="font-medium">{job.company}</span>}
+              {job.title && <span> · {job.title}</span>}
             </p>
-          </>
-        ) : (
-          <p className="text-xs text-gray-400 italic">No gaps — every JD term is covered.</p>
-        )}
-        {(cf.must_have_phrases || []).length > 0 && (
-          <details className="mt-3">
-            <summary className="text-[11px] text-gray-500 cursor-pointer hover:text-gray-700">
-              JD must-have phrases ({cf.must_have_phrases!.length})
-            </summary>
-            <ul className="mt-1 space-y-0.5 text-[11px] text-gray-600 list-disc pl-4">
-              {cf.must_have_phrases!.map((p) => <li key={p}>{p}</li>)}
-            </ul>
-          </details>
-        )}
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl leading-none ml-3">✕</button>
+        </div>
+
+        <textarea
+          autoFocus
+          rows={8}
+          className="input font-sans resize-y w-full"
+          placeholder="Leave a note for your co-worker about this job…"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+
+        <div className="flex items-center justify-between mt-3">
+          <p className="text-xs text-gray-400">
+            {lastUpdated ? <>Last edited {lastUpdated.toLocaleString()}</> : 'No note yet'}
+          </p>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="btn-secondary text-sm">Close</button>
+            <button
+              disabled={!dirty || pending}
+              onClick={() => onSave(text.trim())}
+              className="btn-primary text-sm"
+            >
+              {pending ? 'Saving…' : dirty ? 'Save note' : 'Saved'}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   )
 }
 
-function Metric({
-  label, current, prev,
-}: { label: string; current: string; prev: string | null }) {
-  const changed = prev != null && prev !== current
+
+function relativeDays(iso: string): string {
+  const t = new Date(iso).getTime()
+  const days = Math.floor((Date.now() - t) / 86400000)
+  if (days <= 0) return 'today'
+  if (days === 1) return 'yesterday'
+  if (days < 30) return `${days}d ago`
+  const months = Math.round(days / 30)
+  if (months < 12) return `${months}mo ago`
+  const years = Math.round(days / 365)
+  return `${years}y ago`
+}
+
+
+function AppliedMeta({ job, onReapply }: { job: Job; onReapply: () => void }) {
+  // Two states worth surfacing:
+  //   (1) Applied → show "Applied 14d ago · N×" + a +1 button for re-applies.
+  //   (2) Not yet but apply_count > 0 → it was applied before and undone, hint
+  //       that this is a known posting.
+  const applied = job.application_status === 'applied'
+  const count = job.apply_count || 0
+  const at = job.applied_at
+  if (!applied && count === 0) return null
   return (
-    <li className="flex items-center justify-between gap-2">
-      <span className="text-gray-500">{label}</span>
-      <span className="font-semibold tabular-nums text-gray-900">
-        {current}
-        {changed && (
-          <span className="ml-1 text-[10px] font-normal text-gray-400">
-            (was {prev})
-          </span>
-        )}
-      </span>
-    </li>
+    <div className="flex items-center gap-1.5 flex-wrap text-[11px]">
+      {applied && at && (
+        <span className="text-emerald-700 font-medium">Applied {relativeDays(at)}</span>
+      )}
+      {!applied && count > 0 && (
+        <span className="text-gray-500">Previously applied {count}×</span>
+      )}
+      {count > 1 && (
+        <span
+          className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold tabular-nums"
+          title={`Applied ${count} time${count === 1 ? '' : 's'}`}
+        >
+          {count}×
+        </span>
+      )}
+      {applied && (
+        <button
+          onClick={onReapply}
+          title="Reposted? Mark applied again (bumps the count)."
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold text-brand-700 bg-brand-50 hover:bg-brand-100 border border-brand-200 rounded transition"
+        >
+          <RotateCw className="w-2.5 h-2.5" /> +1 again
+        </button>
+      )}
+    </div>
   )
 }
+
+
+function CoverageInlineChip({ job }: { job: Job }) {
+  const cf = job.coverage_final
+  if (!cf) return null
+  const after = Math.round(cf.weighted_coverage * 100)
+  const before = job.coverage_initial ? Math.round(job.coverage_initial.weighted_coverage * 100) : null
+  const tone =
+    after >= 80 ? 'text-emerald-700 bg-emerald-50 border-emerald-200' :
+    after >= 60 ? 'text-amber-700 bg-amber-50 border-amber-200' :
+                  'text-rose-700 bg-rose-50 border-rose-200'
+  return (
+    <span
+      className={clsx(
+        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-semibold tabular-nums',
+        tone,
+      )}
+      title="JD-weighted coverage: before tailoring → after tailoring"
+    >
+      {before != null && (
+        <>
+          <span className="opacity-60">{before}%</span>
+          <span className="opacity-50">→</span>
+        </>
+      )}
+      <span>{after}%</span>
+      {before != null && before !== after && (
+        <span className="opacity-70">{after - before > 0 ? '+' : ''}{after - before}</span>
+      )}
+    </span>
+  )
+}
+
+
 
 function ManualJdDialog({
   batchId, job, onClose,

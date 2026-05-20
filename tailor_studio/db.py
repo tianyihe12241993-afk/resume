@@ -36,6 +36,9 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # JSON blob with the user's standard form-fill answers (personal info,
+    # eligibility yes/no, etc.). Used by the extension's "Fill form" button.
+    answer_library_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     profiles = relationship("Profile", back_populates="owner", cascade="all, delete-orphan")
@@ -55,6 +58,10 @@ class Profile(Base):
     base_resume_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     tailor_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     daily_target: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Per-profile standard form-fill answers (personal info + eligibility).
+    # Stored per-profile because the same person targets different roles with
+    # different "current title", salary expectations, relocation preference.
+    answer_library_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
@@ -87,11 +94,12 @@ STATUS_NEEDS_JD = "needs_manual_jd"
 STATUS_ERROR = "error"
 
 # Application-funnel statuses (orthogonal to pipeline status).
-#   not_yet    — default for newly tailored jobs (haven't submitted yet)
-#   applied    — successfully submitted an application
-#   error      — couldn't apply (link broken, posting closed, blocked, etc.)
-#   not_remote — posting turned out to require on-site work, skipping
-APP_STATUSES = ("not_yet", "applied", "error", "not_remote")
+#   not_yet     — default for newly tailored jobs (haven't submitted yet)
+#   applied     — successfully submitted an application
+#   error       — couldn't apply (form broken, technical block, etc.)
+#   not_remote  — posting turned out to require on-site work, skipping
+#   unavailable — posting is no longer accepting applications (closed/expired)
+APP_STATUSES = ("not_yet", "applied", "error", "not_remote", "unavailable")
 
 
 class JobUrl(Base):
@@ -109,6 +117,9 @@ class JobUrl(Base):
     company: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     location: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # remote / hybrid / onsite, or NULL when unknown. No CHECK constraint —
+    # callers normalize via app.work_type.
+    work_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     docx_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -128,6 +139,29 @@ class JobUrl(Base):
     applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     application_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     application_source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # Times this job has been "applied" (the same posting can be reposted —
+    # co-worker can mark applied again to bump the count).
+    apply_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # SHA-256 of the tailored .docx — used by the extension to verify the
+    # co-worker uploaded the right file. Lazily populated by the resume_for
+    # endpoint on first observation.
+    resume_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # What file the extension saw uploaded in the job-page form.
+    upload_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    upload_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    upload_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # "tailored" | "base" | "other" — set by upload_observed endpoint.
+    upload_match: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    upload_observed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Collaboration note — free-form text per job for user ↔ co-worker
+    # comms. note_updated_at and note_seen_at drive the unread badge:
+    # an unread note exists when note_updated_at > note_seen_at (or seen
+    # is null and note is non-empty).
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    note_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    note_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
@@ -151,10 +185,44 @@ def init_db() -> None:
         cols = {row[1] for row in conn.execute(text("PRAGMA table_info(job_url)"))}
         if "pdf_filename" not in cols:
             conn.execute(text("ALTER TABLE job_url ADD COLUMN pdf_filename VARCHAR(255)"))
+        if "work_type" not in cols:
+            conn.execute(text("ALTER TABLE job_url ADD COLUMN work_type VARCHAR(16)"))
+        for col_name, col_sql in [
+            ("resume_sha256",       "VARCHAR(64)"),
+            ("upload_filename",     "VARCHAR(255)"),
+            ("upload_size",         "INTEGER"),
+            ("upload_sha256",       "VARCHAR(64)"),
+            ("upload_match",        "VARCHAR(16)"),
+            ("upload_observed_at",  "DATETIME"),
+            ("note",                "TEXT"),
+            ("note_updated_at",     "DATETIME"),
+            ("note_seen_at",        "DATETIME"),
+            ("apply_count",         "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            if col_name not in cols:
+                conn.execute(text(f"ALTER TABLE job_url ADD COLUMN {col_name} {col_sql}"))
+                if col_name == "apply_count":
+                    # Backfill: already-applied rows count as one application.
+                    conn.execute(text(
+                        "UPDATE job_url SET apply_count = 1 "
+                        "WHERE application_status = 'applied'"
+                    ))
         # profile.user_id
         prof_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(profile)"))}
         if "user_id" not in prof_cols:
             conn.execute(text("ALTER TABLE profile ADD COLUMN user_id INTEGER REFERENCES user(id) ON DELETE CASCADE"))
+        user_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(user)"))}
+        if "answer_library_json" not in user_cols:
+            conn.execute(text("ALTER TABLE user ADD COLUMN answer_library_json TEXT"))
+        if "answer_library_json" not in prof_cols:
+            conn.execute(text("ALTER TABLE profile ADD COLUMN answer_library_json TEXT"))
+            # Backfill: if a user already saved answers at user-level, seed
+            # every profile of that user with the same library.
+            conn.execute(text(
+                "UPDATE profile SET answer_library_json = "
+                "(SELECT answer_library_json FROM user WHERE user.id = profile.user_id) "
+                "WHERE answer_library_json IS NULL"
+            ))
         # Remap legacy application_status values to the new 4-status set.
         # Idempotent: only rows still on legacy values are touched.
         conn.execute(text("UPDATE job_url SET application_status = 'not_yet' WHERE application_status = 'new'"))

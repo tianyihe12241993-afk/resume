@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from . import auth, config, pipeline, storage
 from .db import (
     Batch, JobUrl, Profile, get_db,
-    APP_STATUSES, STATUS_DONE, STATUS_ERROR, STATUS_NEEDS_JD,
+    APP_STATUSES, STATUS_DONE, STATUS_ERROR, STATUS_NEEDS_JD, STATUS_PENDING,
 )
 
 
@@ -146,14 +146,26 @@ def _job_out(j: JobUrl, *, with_coverage: bool = False) -> dict:
         "company": j.company,
         "title": j.title,
         "location": j.location,
+        "work_type": j.work_type,
         "description": j.description,
         "error_message": j.error_message,
         "application_status": j.application_status,
         "applied_at": _iso(j.applied_at),
         "application_note": j.application_note,
         "application_source": j.application_source,
+        "apply_count": j.apply_count or 0,
         "has_docx": bool(j.docx_filename),
         "download_count": j.download_count,
+        "upload_filename": j.upload_filename,
+        "upload_match": j.upload_match,
+        "upload_observed_at": _iso(j.upload_observed_at),
+        "note": j.note,
+        "note_updated_at": _iso(j.note_updated_at),
+        "note_seen_at": _iso(j.note_seen_at),
+        "has_unread_note": bool(
+            j.note and j.note.strip() and
+            (j.note_seen_at is None or (j.note_updated_at and j.note_updated_at > j.note_seen_at))
+        ),
         "created_at": _iso(j.created_at),
     }
     if with_coverage:
@@ -216,9 +228,11 @@ def api_dashboard(
 
     profile_statuses = []
     agg_jobs: list[JobUrl] = []
+    today_job_rows: list[tuple[JobUrl, Profile, Batch]] = []
     trend_dates = [(today - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
     agg_trend = [0] * 7
 
+    week_start = today_start - timedelta(days=6)
     for p in profiles:
         today_batch = (
             db.query(Batch)
@@ -232,6 +246,9 @@ def api_dashboard(
         )
         today_jobs: list[JobUrl] = list(today_batch.urls) if today_batch else []
         agg_jobs.extend(today_jobs)
+        if today_batch:
+            for j in today_jobs:
+                today_job_rows.append((j, p, today_batch))
         summary = _batch_summary(today_jobs)
 
         # 7-day applied trend (per-profile)
@@ -242,7 +259,7 @@ def api_dashboard(
             .filter(
                 Batch.profile_id == p.id,
                 JobUrl.applied_at != None,  # noqa: E711
-                JobUrl.applied_at >= today_start - timedelta(days=6),
+                JobUrl.applied_at >= week_start,
                 JobUrl.applied_at < today_end,
             )
             .all()
@@ -256,6 +273,20 @@ def api_dashboard(
             except ValueError:
                 pass
 
+        # This-week aggregate: every JobUrl on any batch created in the
+        # past 7 PT days for this profile, bucketed by status.
+        week_jobs: list[JobUrl] = (
+            db.query(JobUrl)
+            .join(Batch, JobUrl.batch_id == Batch.id)
+            .filter(
+                Batch.profile_id == p.id,
+                Batch.created_at >= week_start,
+                Batch.created_at < today_end,
+            )
+            .all()
+        )
+        week_summary = _batch_summary(week_jobs)
+
         profile_statuses.append({
             "profile": {
                 "id": p.id,
@@ -266,8 +297,37 @@ def api_dashboard(
             "today_batch": {"id": today_batch.id, "created_at": _iso(today_batch.created_at)}
                             if today_batch else None,
             "summary": summary,
+            "week": week_summary,
             "trend": trend,
         })
+
+    # Flat list of today's individual jobs across every profile — drives the
+    # "Today's jobs" detail table on the dashboard. Sorted newest-first.
+    today_job_rows.sort(key=lambda r: (r[0].updated_at or r[0].created_at), reverse=True)
+    today_jobs_out = [
+        {
+            "job_id": j.id,
+            "batch_id": b.id,
+            "profile_id": p.id,
+            "profile_name": p.name,
+            "company": j.company,
+            "title": j.title,
+            "location": j.location,
+            "work_type": j.work_type,
+            "url": j.url,
+            "status": j.status,
+            "application_status": j.application_status,
+            "upload_match": j.upload_match,
+            "apply_count": j.apply_count or 0,
+            "applied_at": _iso(j.applied_at),
+            "created_at": _iso(j.created_at),
+            "has_unread_note": bool(
+                j.note and j.note.strip() and
+                (j.note_seen_at is None or (j.note_updated_at and j.note_updated_at > j.note_seen_at))
+            ),
+        }
+        for (j, p, b) in today_job_rows
+    ]
 
     return {
         "now_pst": _iso(datetime.now(timezone.utc)),
@@ -276,6 +336,7 @@ def api_dashboard(
         "agg": _batch_summary(agg_jobs),
         "agg_trend": agg_trend,
         "trend_dates": trend_dates,
+        "today_jobs": today_jobs_out,
         "ready_profiles": [_profile_out(p) for p in profiles
                             if storage.base_resume_path(p.id).exists()],
         "has_any_profile": len(profiles) > 0,
@@ -386,6 +447,27 @@ def api_profile_detail(
     }
 
 
+@router.get("/admin/profiles/{pid}/resume")
+def api_download_base_resume(
+    pid: int,
+    db: Session = Depends(get_db),
+    user=Depends(auth.require_user),
+):
+    """Serve the base resume .docx for a profile. Used by the extension's
+    Resume Ready widget when no tailored resume exists yet."""
+    from fastapi.responses import FileResponse
+    p = _user_profile(db, user, pid)
+    path = storage.base_resume_path(pid)
+    if not path.exists():
+        raise HTTPException(404, "No base resume uploaded for this profile.")
+    fname = f"{_slugify(p.name)}__base_resume.docx"
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=fname,
+    )
+
+
 @router.post("/admin/profiles/{pid}/resume")
 async def api_upload_resume(
     pid: int,
@@ -424,13 +506,26 @@ def api_create_batch(
     db: Session = Depends(get_db),
     user=Depends(auth.require_user),
 ):
-    p = _user_profile(db, user, body.profile_id)
+    return _queue_urls_for_profile(db, user, body.profile_id, body.urls or "")
+
+
+def _queue_urls_for_profile(
+    db: Session, user, profile_id: int, raw_url_input: str | list[str],
+) -> dict:
+    """Shared core for batch creation. Accepts either the legacy newline-
+    delimited string (BatchCreateIn.urls) or a list of URLs (extension
+    endpoint). Returns the same response shape as api_create_batch."""
+    p = _user_profile(db, user, profile_id)
     if not storage.base_resume_path(p.id).exists():
         raise HTTPException(400, "Upload a base resume for this profile first.")
 
+    if isinstance(raw_url_input, list):
+        candidates = raw_url_input
+    else:
+        candidates = (raw_url_input or "").splitlines()
     raw_urls = [
-        u.strip() for u in (body.urls or "").splitlines()
-        if u.strip() and (u.startswith("http://") or u.startswith("https://"))
+        u.strip() for u in candidates
+        if u and u.strip() and (u.strip().startswith("http://") or u.strip().startswith("https://"))
     ]
     if not raw_urls:
         raise HTTPException(400, "No valid URLs provided.")
@@ -444,14 +539,17 @@ def api_create_batch(
         raise HTTPException(
             400, f"Too many URLs ({len(cleaned)}). Max {config.MAX_URLS_PER_BATCH}."
         )
+    return _queue_cleaned_urls(db, p, raw_urls, cleaned)
 
-    # Skip any URL that already exists for this profile in ANY status —
-    # pending, in-flight, done, error, needs_manual_jd. The user can use the
-    # row-level Retry / Fix-JD buttons to act on existing rows; submitting
-    # the same URL again should not create a duplicate JobUrl.
-    existing_by_status: dict[str, set[str]] = {}
+
+def _queue_cleaned_urls(db: Session, p, raw_urls, cleaned) -> dict:
+
+    # Skip any URL that already exists for this profile in ANY status. Most
+    # of the time these are duplicates the user pasted again by mistake; but
+    # for reposted jobs they may want to re-apply, so the response surfaces
+    # each existing row's last-applied info so the UI can make that visible.
     rows = (
-        db.query(JobUrl.url, JobUrl.status)
+        db.query(JobUrl, Batch)
         .join(Batch, JobUrl.batch_id == Batch.id)
         .filter(
             Batch.profile_id == p.id,
@@ -460,13 +558,32 @@ def api_create_batch(
         .all()
     )
     existing_urls: set[str] = set()
-    for url_value, status_value in rows:
-        existing_urls.add(url_value)
-        existing_by_status.setdefault(status_value, set()).add(url_value)
+    existing_by_status: dict[str, set[str]] = {}
+    duplicates: list[dict] = []
+    now_utc = datetime.now(timezone.utc)
+    for (j, b) in rows:
+        existing_urls.add(j.url)
+        existing_by_status.setdefault(j.status, set()).add(j.url)
+        days_since_applied = None
+        if j.applied_at:
+            applied = j.applied_at
+            if applied.tzinfo is None:
+                applied = applied.replace(tzinfo=timezone.utc)
+            days_since_applied = int((now_utc - applied).total_seconds() // 86400)
+        duplicates.append({
+            "url": j.url,
+            "job_id": j.id,
+            "batch_id": b.id,
+            "status": j.status,
+            "application_status": j.application_status,
+            "applied_at": _iso(j.applied_at),
+            "days_since_applied": days_since_applied,
+            "apply_count": j.apply_count or 0,
+            "company": j.company,
+            "title": j.title,
+        })
     todo_urls = [u for u in cleaned if u not in existing_urls]
     if not todo_urls:
-        # Build a small message that distinguishes "already tailored" from
-        # other states so the user understands why nothing was queued.
         n_done    = len(existing_by_status.get(STATUS_DONE, set()))
         n_other   = len(existing_urls) - n_done
         bits = []
@@ -477,6 +594,7 @@ def api_create_batch(
             "skipped_done": n_done,
             "skipped_existing": len(existing_urls),
             "skipped_dupe": 0,
+            "duplicates": duplicates,
             "message": "All URLs already submitted for this profile (" + ", ".join(bits) + ").",
         }
 
@@ -511,7 +629,674 @@ def api_create_batch(
         "skipped_done": len(existing_by_status.get(STATUS_DONE, set())),
         "skipped_existing": len(existing_urls),
         "skipped_dupe": len(raw_urls) - len(cleaned),
+        "duplicates": duplicates,
     }
+
+
+def _user_stuck_jobs_for_url(db: Session, user, url: str) -> list[JobUrl]:
+    """Return JobUrl rows owned by ``user`` that match ``url`` and are stuck
+    in a state Rescue Mode can recover: needs_manual_jd or scrape-error."""
+    return (
+        db.query(JobUrl)
+        .join(Batch, JobUrl.batch_id == Batch.id)
+        .join(Profile, Batch.profile_id == Profile.id)
+        .filter(Profile.user_id == user.id)
+        .filter(JobUrl.url == url)
+        .filter(JobUrl.status.in_([STATUS_NEEDS_JD, STATUS_ERROR]))
+        .all()
+    )
+
+
+class ExtensionCheckIn(BaseModel):
+    url: str
+
+
+@router.post("/extension/check_url")
+def api_extension_check_url(
+    body: ExtensionCheckIn,
+    db: Session = Depends(get_db),
+    user=Depends(auth.require_user),
+):
+    """Cheap probe used by the content script: 'is this URL stuck?'.
+    Content script only sends the rendered DOM when the answer is yes."""
+    stuck = _user_stuck_jobs_for_url(db, user, body.url)
+    return {"stuck": len(stuck) > 0, "count": len(stuck)}
+
+
+class ExtensionRescueIn(BaseModel):
+    url: str
+    html: str
+
+
+@router.post("/extension/rescue")
+def api_extension_rescue(
+    body: ExtensionRescueIn,
+    db: Session = Depends(get_db),
+    user=Depends(auth.require_user),
+):
+    """Receive the rendered DOM from the content script for a URL the user
+    has stuck. Runs Haiku extraction on the *rendered* HTML (which the
+    server-side scrape could not see), populates company/title/location/
+    work_type/description on every matching stuck JobUrl, sets status back
+    to pending, and re-enqueues the tailoring pipeline.
+    """
+    from app.scraping import _haiku_extract_from_html, _finalize
+    from app import scrape_cache
+
+    if not body.url or not body.html:
+        raise HTTPException(400, "Missing url or html.")
+    # Defensive cap. _haiku_extract_from_html truncates to 30K internally;
+    # the network cap protects us from runaway request bodies.
+    html = body.html
+    if len(html) > 2_000_000:
+        html = html[:2_000_000]
+
+    stuck = _user_stuck_jobs_for_url(db, user, body.url)
+    if not stuck:
+        return {"rescued": 0, "message": "No stuck job for this URL."}
+
+    info = _haiku_extract_from_html(html, body.url)
+    if not info or not info.get("description"):
+        return {
+            "rescued": 0,
+            "error": "Could not extract a job description from the rendered DOM.",
+        }
+    info = _finalize(info)
+    # Cache it so future fetches of the same URL (e.g. re-tailor) get the
+    # rescued content for free.
+    try:
+        scrape_cache.put(body.url, info)
+    except Exception:
+        pass
+
+    rescued_ids = []
+    for ju in stuck:
+        if not ju.company and info.get("company"): ju.company = info["company"]
+        if not ju.title   and info.get("title"):   ju.title   = info["title"]
+        if not ju.location and info.get("location"): ju.location = info["location"]
+        if not ju.work_type and info.get("work_type"): ju.work_type = info["work_type"]
+        ju.description = info["description"]
+        ju.status = STATUS_PENDING
+        ju.error_message = None
+        rescued_ids.append(ju.id)
+    db.commit()
+
+    # Re-enqueue after commit so the worker sees the populated row.
+    for jid in rescued_ids:
+        pipeline.enqueue(jid)
+
+    return {
+        "rescued": len(rescued_ids),
+        "company": info.get("company"),
+        "title": info.get("title"),
+    }
+
+
+@router.get("/extension/resume_for")
+def api_extension_resume_for(
+    url: str,
+    profile_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    user=Depends(auth.require_user),
+):
+    """Tell the in-page widget what resume to surface for ``url``.
+
+    If ``profile_id`` is provided (the extension's saved 'main profile'),
+    only matching JobUrl rows for that profile are returned. Otherwise
+    falls back to the most recently created match across all the user's
+    profiles. Includes the base-resume path so the widget can offer it as
+    a fallback when no tailored .docx is ready yet.
+    """
+    if not url:
+        raise HTTPException(400, "Missing url.")
+
+    q = (
+        db.query(JobUrl, Batch, Profile)
+        .join(Batch, JobUrl.batch_id == Batch.id)
+        .join(Profile, Batch.profile_id == Profile.id)
+        .filter(Profile.user_id == user.id)
+        .filter(JobUrl.url == url)
+    )
+    if profile_id is not None:
+        q = q.filter(Profile.id == profile_id)
+    row = q.order_by(JobUrl.created_at.desc()).first()
+
+    # Always include the main-profile base-resume info so the widget can
+    # fall back when no tailored resume exists yet.
+    main_profile = None
+    if profile_id is not None:
+        p = db.get(Profile, profile_id)
+        if p and p.user_id == user.id:
+            main_profile = p
+    elif row:
+        main_profile = row[2]
+
+    base = None
+    if main_profile:
+        has_base = storage.base_resume_path(main_profile.id).exists()
+        base = {
+            "profile_id": main_profile.id,
+            "profile_name": main_profile.name,
+            "has_base": has_base,
+            "base_url": f"/api/admin/profiles/{main_profile.id}/resume" if has_base else None,
+            "base_filename": f"{_slugify(main_profile.name)}__base_resume.docx",
+        }
+
+    if not row:
+        return {"matched": False, "base": base}
+
+    j, b, p = row
+    tailored = None
+    if j.status == STATUS_DONE and j.docx_filename:
+        # Build the same friendly filename the /download route returns so
+        # the user sees consistent names in ~/Downloads.
+        bits = []
+        if p.name:    bits.append(_slugify(p.name))
+        if j.company: bits.append(_slugify(j.company))
+        if j.title:   bits.append(_slugify(j.title))
+        fname = ("__".join(bits) or f"job{j.id}") + ".docx"
+        # Lazy-compute and persist the docx hash so the extension can
+        # verify the uploaded file later. Cheap: ~10ms for a 50KB docx.
+        had_hash = bool(j.resume_sha256)
+        size, sha = _docx_hash_and_size(j)
+        if sha and not had_hash:
+            db.commit()
+        tailored = {
+            "job_id": j.id,
+            "docx_url": f"/download/{j.id}/docx",
+            "pdf_url": f"/download/{j.id}/pdf",
+            "filename": fname,
+            "size": size,
+            "sha256": sha,
+        }
+
+    return {
+        "matched": True,
+        "job_id": j.id,
+        "profile_id": p.id,
+        "profile_name": p.name,
+        "company": j.company,
+        "title": j.title,
+        "status": j.status,
+        "application_status": j.application_status,
+        "has_tailored": bool(tailored),
+        "tailored": tailored,
+        "base": base,
+    }
+
+
+def _slugify(s: str) -> str:
+    import re as _re
+    return _re.sub(r"[^A-Za-z0-9_-]+", "_", (s or "").strip()).strip("_") or "x"
+
+
+def _file_sha256(path) -> Optional[str]:
+    """Stream-hash a file. Returns None if the file is missing or unreadable."""
+    import hashlib
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _docx_hash_and_size(j: JobUrl) -> tuple[Optional[int], Optional[str]]:
+    """Return (size, sha256) for the tailored .docx. Computes lazily and
+    persists on the JobUrl row so subsequent calls are free. Returns
+    (None, None) if the file is missing (pruned or never generated)."""
+    if not j.docx_filename:
+        return None, None
+    path = config.OUTPUTS_DIR / j.docx_filename
+    if not path.exists():
+        return None, None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = None
+    sha = j.resume_sha256
+    if not sha:
+        sha = _file_sha256(path)
+        if sha:
+            j.resume_sha256 = sha
+            # Caller is inside a Session — flushing later on commit.
+    return size, sha
+
+
+class UploadObservedIn(BaseModel):
+    url: str
+    filename: str
+    size: int
+    sha256: str
+
+
+@router.post("/extension/upload_observed")
+def api_extension_upload_observed(
+    body: UploadObservedIn,
+    db: Session = Depends(get_db),
+    user=Depends(auth.require_user),
+):
+    """Receive a file-input observation from the extension content script.
+
+    For each JobUrl owned by ``user`` matching ``body.url``, record what
+    the co-worker selected on the upload form and classify the match as
+    'tailored' / 'base' / 'other' so the studio UI can audit which jobs
+    actually got the right resume uploaded.
+    """
+    rows = (
+        db.query(JobUrl, Batch, Profile)
+        .join(Batch, JobUrl.batch_id == Batch.id)
+        .join(Profile, Batch.profile_id == Profile.id)
+        .filter(Profile.user_id == user.id)
+        .filter(JobUrl.url == body.url)
+        .all()
+    )
+    if not rows:
+        return {"observed": 0}
+
+    # We may need each profile's base-resume hash for the "uploaded base
+    # instead of tailored" case. Cache by profile_id.
+    base_hashes: dict[int, Optional[str]] = {}
+    def base_sha(profile_id: int) -> Optional[str]:
+        if profile_id in base_hashes:
+            return base_hashes[profile_id]
+        p_path = storage.base_resume_path(profile_id)
+        sha = _file_sha256(p_path) if p_path.exists() else None
+        base_hashes[profile_id] = sha
+        return sha
+
+    observed = 0
+    for j, b, p in rows:
+        # Decide match category.
+        match = "other"
+        # Refresh resume_sha256 if missing.
+        if not j.resume_sha256 and j.docx_filename:
+            path = config.OUTPUTS_DIR / j.docx_filename
+            if path.exists():
+                j.resume_sha256 = _file_sha256(path)
+        if j.resume_sha256 and body.sha256 == j.resume_sha256:
+            match = "tailored"
+        elif base_sha(p.id) and body.sha256 == base_sha(p.id):
+            match = "base"
+        j.upload_filename = body.filename[:255]
+        j.upload_size = body.size
+        j.upload_sha256 = body.sha256
+        j.upload_match = match
+        j.upload_observed_at = datetime.now(timezone.utc)
+        observed += 1
+    db.commit()
+    return {"observed": observed, "match": rows[0][0].upload_match}
+
+
+def _default_answer_library() -> dict:
+    """Empty scaffold returned for users who haven't set any answers yet.
+    Keeps the frontend simple — every field is always present."""
+    return {
+        "personal": {
+            "first_name": "", "last_name": "", "email": "", "phone": "",
+            "linkedin_url": "", "github_url": "", "portfolio_url": "",
+            "address_city": "", "address_state": "", "address_country": "",
+            "address_zip": "",
+        },
+        "professional": {
+            "current_company": "", "current_title": "",
+            "years_of_experience": "",
+        },
+        "eligibility": {
+            "us_authorized": None,         # True / False / None (unknown)
+            "need_sponsorship": None,
+            "willing_to_relocate": None,
+            "willing_remote": None,
+            "salary_expectation": "",
+            "preferred_start": "",
+        },
+        # Optional EEO / voluntary self-identification.
+        # String values match the dropdown options on Lever / Greenhouse /
+        # Ashby (case-insensitive partial-match in formfill).
+        "demographics": {
+            "gender": "",                  # "Male" / "Female" / "Non-binary" / "Decline to self-identify"
+            "race": "",
+            "veteran": "",                 # "I am not a protected veteran" / "I am a protected veteran" / "Decline…"
+            "disability": "",              # "No, I do not have a disability" / "Yes…" / "Decline…"
+        },
+    }
+
+
+def _merge_answers(stored: dict, incoming: dict) -> dict:
+    """Deep-merge incoming over stored, preserving the scaffold shape."""
+    out = _default_answer_library()
+    for section in out.keys():
+        s = (stored or {}).get(section) or {}
+        i = (incoming or {}).get(section) or {}
+        for k in out[section].keys():
+            if k in i:
+                out[section][k] = i[k]
+            elif k in s:
+                out[section][k] = s[k]
+    return out
+
+
+def _load_profile_answers(p: Profile) -> dict:
+    raw = (p.answer_library_json or "").strip()
+    stored: dict = {}
+    if raw:
+        try:
+            stored = json.loads(raw)
+        except (TypeError, ValueError):
+            stored = {}
+    return _merge_answers(stored, {})
+
+
+@router.get("/admin/answers")
+def api_get_answers(
+    profile_id: int,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    """Return one profile's standard form-fill answers."""
+    p = _user_profile(db, me, profile_id)
+    return {"profile_id": p.id, "answers": _load_profile_answers(p)}
+
+
+class AnswersIn(BaseModel):
+    profile_id: int
+    answers: dict
+
+
+@router.post("/admin/answers")
+def api_save_answers(
+    body: AnswersIn,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    """Persist a profile's answer library."""
+    p = _user_profile(db, me, body.profile_id)
+    raw = (p.answer_library_json or "").strip()
+    stored: dict = {}
+    if raw:
+        try:
+            stored = json.loads(raw)
+        except (TypeError, ValueError):
+            stored = {}
+    merged = _merge_answers(stored, body.answers or {})
+    p.answer_library_json = json.dumps(merged, ensure_ascii=False)
+    db.commit()
+    return {"profile_id": p.id, "answers": merged}
+
+
+@router.get("/extension/answers")
+def api_extension_answers(
+    profile_id: int,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    """Same payload as /admin/answers — namespace alias for the extension."""
+    return api_get_answers(profile_id, db, me)
+
+
+class DraftQuestion(BaseModel):
+    id: str
+    text: str            # the question text the candidate is being asked
+    kind: str = "text"   # "text" | "textarea" | "radio" | "select"
+    options: Optional[list[str]] = None  # for radio/select
+
+
+class DraftAnswersIn(BaseModel):
+    url: str
+    profile_id: Optional[int] = None
+    questions: list[DraftQuestion]
+
+
+_ANSWER_CACHE_VERSION = "1"
+
+
+def _answer_cache_path(profile_id: Optional[int], question_text: str, context_hash: str) -> Path:
+    import hashlib
+    from app import config as app_config
+    norm = " ".join((question_text or "").lower().split())
+    h = hashlib.sha256()
+    h.update(_ANSWER_CACHE_VERSION.encode()); h.update(b"\x00")
+    h.update(str(profile_id or 0).encode()); h.update(b"\x00")
+    h.update(norm.encode("utf-8")); h.update(b"\x00")
+    h.update(context_hash.encode("utf-8"))
+    cache_dir = app_config.DATA_DIR / "answer_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"{h.hexdigest()}.txt"
+
+
+def _load_cached_answer(profile_id: Optional[int], question_text: str, context_hash: str) -> Optional[str]:
+    p = _answer_cache_path(profile_id, question_text, context_hash)
+    if not p.exists():
+        return None
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _save_cached_answer(profile_id: Optional[int], question_text: str, context_hash: str, answer: str) -> None:
+    try:
+        _answer_cache_path(profile_id, question_text, context_hash).write_text(answer, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _draft_one(client, question: DraftQuestion, context_block: str,
+               *, profile_id: Optional[int] = None,
+               context_hash: str = "") -> str:
+    """Single Claude (Haiku) call for one application question. Disk-cached
+    by (profile_id, normalized question text, candidate context hash) so
+    repeat questions across applications return instantly."""
+    from app import config as app_config
+
+    # Cache check first — many questions repeat verbatim across applications.
+    cached = _load_cached_answer(profile_id, question.text, context_hash)
+    if cached is not None:
+        return cached
+    if question.kind in ("radio", "select") and question.options:
+        opts_block = "\n".join(f"- {o}" for o in question.options)
+        instruction = (
+            f"Pick the most accurate option for this candidate. Output JUST the option text "
+            f"verbatim — no quotes, no explanation.\n\nOPTIONS:\n{opts_block}"
+        )
+    else:
+        instruction = (
+            "Generate the candidate's answer in their first-person voice. "
+            "1–3 sentences for short questions, max one short paragraph for "
+            "essay questions. Concrete, specific, grounded in their actual "
+            "experience from the corpus. Don't invent metrics, employers, or "
+            "products. No marketing fluff. Output just the answer text — "
+            "no preamble, no quotes."
+        )
+
+    prompt = (
+        f"CANDIDATE CONTEXT:\n{context_block}\n\n"
+        f"QUESTION:\n{question.text.strip()}\n\n"
+        f"{instruction}"
+    )
+    resp = client.messages.create(
+        model=app_config.EXTRACT_MODEL,   # Haiku — fast + cheap
+        max_tokens=600,
+        temperature=0.3,
+        system=[{"type": "text",
+                 "text": "You are filling out a job application as the candidate. Be honest, "
+                         "specific, and concise. Match the question's register: a Yes/No gets "
+                         "one word, a 'tell us about a time' gets a short STAR-style story "
+                         "grounded in the candidate's real work."}],
+        messages=[{"role": "user", "content": prompt}],
+    )
+    out = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+    # Strip surrounding quote marks if Claude added them
+    if len(out) >= 2 and out[0] in ('"', '"', '"', "'") and out[-1] in ('"', '"', '"', "'"):
+        out = out[1:-1].strip()
+    _save_cached_answer(profile_id, question.text, context_hash, out)
+    return out
+
+
+def _build_candidate_context_block(
+    db: Session, user, url: str, profile_id_hint: Optional[int],
+) -> tuple[str, Optional[int]]:
+    """Pull together every grounding signal we have for the LLM:
+       - JD text (if a JobUrl row exists for the URL + profile)
+       - Candidate deep profile (from app.profile_extractor cache)
+       - Standard answer library (personal + professional + eligibility)
+    Returns (context_text, matched_profile_id).
+    """
+    from app.profile_extractor import extract_candidate_profile, profile_summary_text
+    from app.similarity import docx_text
+
+    # Find the best-matching JobUrl: prefer the profile_id hint, fall back to
+    # most-recent match.
+    q = (
+        db.query(JobUrl, Batch, Profile)
+        .join(Batch, JobUrl.batch_id == Batch.id)
+        .join(Profile, Batch.profile_id == Profile.id)
+        .filter(Profile.user_id == user.id)
+        .filter(JobUrl.url == url)
+    )
+    if profile_id_hint is not None:
+        q = q.filter(Profile.id == profile_id_hint)
+    row = q.order_by(JobUrl.created_at.desc()).first()
+
+    profile: Optional[Profile] = None
+    jd_text: str = ""
+    job_company: str = ""
+    job_title: str = ""
+    if row:
+        j, _b, p = row
+        profile = p
+        jd_text = (j.description or "")[:8000]
+        job_company = j.company or ""
+        job_title = j.title or ""
+    elif profile_id_hint is not None:
+        profile = db.get(Profile, profile_id_hint)
+        if profile and profile.user_id != user.id:
+            profile = None
+
+    bits: list[str] = []
+    if job_company or job_title:
+        bits.append(f"TARGET ROLE: {job_title} @ {job_company}")
+    if jd_text:
+        bits.append(f"JOB DESCRIPTION:\n{jd_text}")
+
+    # Deep candidate profile — built once per resume, cached
+    if profile:
+        try:
+            base = storage.base_resume_path(profile.id)
+            if base.exists():
+                resume_text = docx_text(base)
+                deep = extract_candidate_profile(resume_text)
+                summary = profile_summary_text(deep, max_chars=4000)
+                if summary:
+                    bits.append("CANDIDATE EXPERIENCE PROFILE:\n" + summary)
+        except Exception:
+            pass
+
+    # Standard answer library
+    if profile:
+        try:
+            ans = _load_profile_answers(profile)
+            lines = []
+            for section_key, section_label in (
+                ("personal", "Personal"),
+                ("professional", "Professional"),
+                ("eligibility", "Eligibility"),
+            ):
+                section = ans.get(section_key) or {}
+                for k, v in section.items():
+                    if v in (None, ""):
+                        continue
+                    if v is True:
+                        v = "Yes"
+                    elif v is False:
+                        v = "No"
+                    pretty = k.replace("_", " ")
+                    lines.append(f"  • {pretty}: {v}")
+            if lines:
+                bits.append("STANDARD ANSWERS:\n" + "\n".join(lines))
+        except Exception:
+            pass
+
+    return ("\n\n".join(bits) or "(no context available)"), (profile.id if profile else None)
+
+
+@router.post("/extension/draft_answers")
+def api_extension_draft_answers(
+    body: DraftAnswersIn,
+    db: Session = Depends(get_db),
+    user=Depends(auth.require_user),
+):
+    """Draft answers for a list of application-form questions using the
+    candidate's deep profile + JD + standard answer library. One Claude
+    call per question. Used by the co-worker extension's '✨ Draft' button."""
+    from anthropic import Anthropic
+    from app import config as app_config
+    if not app_config.ANTHROPIC_API_KEY:
+        raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
+    if not body.questions:
+        return {"drafts": [], "profile_id": None}
+
+    context_text, matched_pid = _build_candidate_context_block(
+        db, user, body.url, body.profile_id,
+    )
+    # Cache by a hash of the candidate-context only (not the question or
+    # profile id). Resume updates / answer-library updates change the hash
+    # and naturally invalidate stale cached answers.
+    import hashlib
+    context_hash = hashlib.sha256(context_text.encode("utf-8")).hexdigest()[:16]
+    client = Anthropic(api_key=app_config.ANTHROPIC_API_KEY)
+
+    drafts: list[dict] = []
+    for q in body.questions:
+        try:
+            answer = _draft_one(client, q, context_text,
+                                profile_id=matched_pid, context_hash=context_hash)
+        except Exception as e:
+            drafts.append({"id": q.id, "answer": "", "error": str(e)[:200]})
+            continue
+        drafts.append({"id": q.id, "answer": answer})
+
+    return {"drafts": drafts, "profile_id": matched_pid}
+
+
+class ExtensionQueueIn(BaseModel):
+    urls: list[str]
+    profile_ids: list[int]
+
+
+@router.post("/extension/queue")
+def api_extension_queue(
+    body: ExtensionQueueIn,
+    db: Session = Depends(get_db),
+    user=Depends(auth.require_user),
+):
+    """One-click batch entry for the browser extension. Accepts a list of
+    URLs scraped from the user's open tabs and fans them out to one or more
+    profiles. Per-profile result mirrors ``api_create_batch``'s shape."""
+    if not body.urls:
+        raise HTTPException(400, "No URLs provided.")
+    if not body.profile_ids:
+        raise HTTPException(400, "Pick at least one profile.")
+
+    results = []
+    for pid in body.profile_ids:
+        try:
+            r = _queue_urls_for_profile(db, user, pid, body.urls)
+            # Look up the profile name so the popup can show a useful summary.
+            prof = db.get(Profile, pid)
+            r["profile_id"] = pid
+            r["profile_name"] = prof.name if prof else f"#{pid}"
+            results.append(r)
+        except HTTPException as e:
+            results.append({
+                "profile_id": pid,
+                "profile_name": "",
+                "error": e.detail,
+                "added": 0,
+            })
+    return {"results": results}
 
 
 @router.get("/admin/batches/{bid}")
@@ -631,17 +1416,110 @@ def api_app_status(
     if new_status not in APP_STATUSES:
         raise HTTPException(400, f"Invalid status '{new_status}'.")
     j = _user_job(db, me, bid, jid)
+    prev_status = j.application_status
     j.application_status = new_status
-    if new_status == "applied" and not j.applied_at:
-        j.applied_at = datetime.now(timezone.utc)
-        j.application_source = "manual"
-    if new_status in ("not_yet", "error", "not_remote"):
+    if new_status == "applied":
+        # Count this as a new application attempt every time the user
+        # transitions into "applied" — even from another non-yet state.
+        # (Within-applied bumps go through /reapply.)
+        if prev_status != "applied":
+            j.apply_count = (j.apply_count or 0) + 1
+            j.applied_at = datetime.now(timezone.utc)
+            j.application_source = "manual"
+    if new_status in ("not_yet", "error", "not_remote", "unavailable"):
         j.applied_at = None
         j.application_source = None
     if body.note is not None:
         j.application_note = body.note.strip() or None
     db.commit()
     return {"job": _job_out(j)}
+
+
+@router.post("/admin/batches/{bid}/jobs/{jid}/reapply")
+def api_reapply(
+    bid: int, jid: int,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    """Record an additional application attempt for a job. Use this when a
+    job has been reposted and the co-worker is applying again. Always bumps
+    apply_count and resets applied_at to now()."""
+    j = _user_job(db, me, bid, jid)
+    j.application_status = "applied"
+    j.apply_count = (j.apply_count or 0) + 1
+    j.applied_at = datetime.now(timezone.utc)
+    j.application_source = "manual"
+    db.commit()
+    return {"job": _job_out(j)}
+
+
+class NoteIn(BaseModel):
+    text: str
+
+
+@router.post("/admin/batches/{bid}/jobs/{jid}/note")
+def api_save_note(
+    bid: int, jid: int, body: NoteIn,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    """Save the collaboration note for a job. Touches note_updated_at so
+    the unread badge fires for the other viewer until they open the note."""
+    j = _user_job(db, me, bid, jid)
+    text = (body.text or "").strip()
+    j.note = text or None
+    j.note_updated_at = datetime.now(timezone.utc) if text else None
+    if not text:
+        # Clearing the note also clears the seen marker so the unread state
+        # is consistent ("nothing to read").
+        j.note_seen_at = None
+    db.commit()
+    return {"job": _job_out(j)}
+
+
+@router.post("/admin/batches/{bid}/jobs/{jid}/note/seen")
+def api_mark_note_seen(
+    bid: int, jid: int,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    """Mark the collaboration note as read by stamping note_seen_at = now()."""
+    j = _user_job(db, me, bid, jid)
+    j.note_seen_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"job": _job_out(j)}
+
+
+@router.get("/admin/notes/unread")
+def api_unread_notes(
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    """Count of jobs across the user's profiles that have an unread
+    collaboration note. Powers the sidebar notification dot."""
+    rows = (
+        db.query(JobUrl, Batch, Profile)
+        .join(Batch, JobUrl.batch_id == Batch.id)
+        .join(Profile, Batch.profile_id == Profile.id)
+        .filter(Profile.user_id == me.id)
+        .filter(JobUrl.note.isnot(None))
+        .all()
+    )
+    unread = 0
+    samples = []
+    for (j, b, _p) in rows:
+        if not j.note or not j.note.strip():
+            continue
+        if j.note_seen_at is None or (j.note_updated_at and j.note_updated_at > j.note_seen_at):
+            unread += 1
+            if len(samples) < 5:
+                samples.append({
+                    "job_id": j.id, "batch_id": b.id,
+                    "company": j.company, "title": j.title,
+                    "note": j.note[:200],
+                    "updated_at": _iso(j.note_updated_at),
+                })
+    return {"count": unread, "samples": samples}
 
 
 @router.post("/admin/batches/{bid}/retry-errors")
@@ -672,6 +1550,7 @@ def api_retry_errors(
 def api_search(
     q: str = Query(..., min_length=1, max_length=200),
     status: Optional[str] = Query(None),
+    work_type: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
     me=Depends(auth.require_user),
@@ -697,6 +1576,11 @@ def api_search(
     )
     if status:
         query = query.filter(JobUrl.status == status)
+    if work_type:
+        if work_type == "unknown":
+            query = query.filter(JobUrl.work_type.is_(None))
+        elif work_type in ("remote", "hybrid", "onsite"):
+            query = query.filter(JobUrl.work_type == work_type)
     rows = query.order_by(JobUrl.created_at.desc()).limit(limit).all()
     return {
         "query": q,

@@ -1,0 +1,67 @@
+{
+  "manifest_version": 3,
+  "name": "Tailor Studio — Co-worker",
+  "description": "Apply-side helper: auto-downloads the right tailored resume on each job page, drafts answers for essay questions, audits which file got uploaded.",
+  "version": "0.6.0",
+  "action": {
+    "default_title": "Tailor Studio (Co-worker): draft + apply",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["tabs", "storage", "downloads"],
+  "host_permissions": [
+    "http://127.0.0.1:8001/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.greenhouse.io/*",
+        "*://*.lever.co/*",
+        "*://*.ashbyhq.com/*",
+        "*://*.myworkdayjobs.com/*",
+        "*://*.rippling.com/*",
+        "*://*.smartrecruiters.com/*",
+        "*://*.workable.com/*",
+        "*://*.oraclecloud.com/*",
+        "*://*.icims.com/*",
+        "*://*.workday.com/*",
+        "*://*.ripplehire.com/*",
+        "*://*.pinpointhq.com/*",
+        "*://*.personio.com/*",
+        "*://*.freshteam.com/*",
+        "*://*.applytojob.com/*",
+        "*://*.recruiterflow.com/*",
+        "*://*.ashby.com/*",
+        "*://*.jobright.ai/*",
+        "*://*.gem.com/*",
+        "*://*.bamboohr.com/*",
+        "*://*.jazzhr.com/*",
+        "*://*.jobvite.com/*",
+        "*://*.taleo.net/*",
+        "*://*.adp.com/*",
+        "*://workforcenow.adp.com/*",
+        "*://*.brassring.com/*",
+        "*://*.wd1.myworkdayjobs.com/*",
+        "*://*.wd5.myworkdayjobs.com/*",
+        "*://*.wd12.myworkdayjobs.com/*"
+      ],
+      "js": ["formfill.js", "content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

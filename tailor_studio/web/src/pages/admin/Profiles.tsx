@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronRight, Pencil, Trash2, Check, X } from 'lucide-react'
+import { ChevronRight, Pencil, Trash2, Check, X, FileCheck, FileWarning } from 'lucide-react'
 import { api, type Profile } from '@/lib/api'
 import { Empty } from '@/components/ui'
+import { Avatar } from '@/components/charts'
 
 export default function Profiles() {
   const qc = useQueryClient()
@@ -22,18 +23,18 @@ export default function Profiles() {
 
   return (
     <>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Profiles</h1>
-        <span className="text-sm text-gray-400">{profiles.length} total</span>
-      </div>
-
-      <div className="card p-5 mb-6">
-        <h2 className="text-sm font-semibold text-gray-700 mb-3">Create a new profile</h2>
+      <div className="flex items-end justify-between mb-4">
+        <div>
+          <p className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-0.5">Workspace</p>
+          <h1 className="text-2xl font-bold text-gray-900">
+            Profiles <span className="text-gray-400 font-normal text-base">({profiles.length})</span>
+          </h1>
+        </div>
         <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (name.trim()) create.mutate() }}>
-          <input required className="input flex-1" placeholder="e.g. AI Engineering"
+          <input required className="input" placeholder="New profile name…"
                  value={name} onChange={(e) => setName(e.target.value)} />
-          <button disabled={create.isPending} className="btn-primary shrink-0">
-            {create.isPending ? 'Creating…' : 'Create'}
+          <button disabled={create.isPending} className="btn-primary shrink-0 whitespace-nowrap">
+            {create.isPending ? 'Creating…' : '+ Create'}
           </button>
         </form>
       </div>
@@ -100,16 +101,26 @@ function ProfileRow({ profile }: { profile: Profile }) {
 
   return (
     <li className="flex items-center px-5 py-4 hover:bg-slate-50/60 transition">
-      <Link to={`/admin/profiles/${profile.id}`} className="flex-1 min-w-0">
-        <p className="font-semibold text-gray-900 truncate">{profile.name}</p>
-        <p className="text-xs text-gray-400 mt-0.5">
-          {profile.batch_count} batches ·{' '}
-          {profile.base_resume_filename ? (
-            <span className="text-gray-600">{profile.base_resume_filename}</span>
-          ) : (
-            <span className="text-amber-600 font-medium">no base resume</span>
-          )}
-        </p>
+      <Link to={`/admin/profiles/${profile.id}`} className="flex items-center gap-3 flex-1 min-w-0">
+        <Avatar name={profile.name} size={40} />
+        <div className="flex-1 min-w-0">
+          <p className="font-semibold text-gray-900 truncate">{profile.name}</p>
+          <p className="text-xs text-gray-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded text-[10px] font-semibold">
+              {profile.batch_count} {profile.batch_count === 1 ? 'batch' : 'batches'}
+            </span>
+            {profile.base_resume_filename ? (
+              <span className="inline-flex items-center gap-1 text-emerald-700">
+                <FileCheck className="w-3 h-3" />
+                <span className="truncate max-w-[280px]">{profile.base_resume_filename}</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-amber-700 font-medium">
+                <FileWarning className="w-3 h-3" /> no base resume
+              </span>
+            )}
+          </p>
+        </div>
       </Link>
       <div className="flex items-center gap-1 shrink-0 ml-3">
         <button

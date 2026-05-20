@@ -10,6 +10,25 @@ from urllib.parse import parse_qs, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from .work_type import classify_work_type, normalize_work_type
+
+
+def _finalize(info: Optional[dict]) -> Optional[dict]:
+    """Fill in ``work_type`` via the deterministic classifier when the per-ATS
+    extractor did not produce one. Never overwrites a structured value. Safe
+    to call on a None input."""
+    if not info:
+        return info
+    wt = normalize_work_type(info.get("work_type"))
+    if not wt:
+        wt = classify_work_type(
+            title=info.get("title") or "",
+            location=info.get("location") or "",
+            description=info.get("description") or "",
+        )
+    info["work_type"] = wt
+    return info
+
 
 def _html_to_text(value: str) -> str:
     """Turn HTML (possibly entity-encoded) into clean plain text."""
@@ -48,6 +67,7 @@ def _fetch_ashby(url: str) -> Optional[dict]:
                     "company": data.get("name") or slug,
                     "title": posting.get("title", ""),
                     "location": posting.get("location", ""),
+                    "work_type": posting.get("workplaceType"),
                     "description": (
                         posting.get("descriptionPlain")
                         or _html_to_text(posting.get("descriptionHtml", ""))
@@ -77,6 +97,9 @@ def _fetch_lever(url: str) -> Optional[dict]:
             "company": slug,
             "title": data.get("text", ""),
             "location": (data.get("categories") or {}).get("location", ""),
+            "work_type": (data.get("workplaceType")
+                          or (data.get("categories") or {}).get("commitment")
+                          or (data.get("categories") or {}).get("workplaceType")),
             "description": _html_to_text(desc_html),
         }
     except Exception:
@@ -93,12 +116,30 @@ def _fetch_greenhouse(url: str) -> Optional[dict]:
             r = _get(api)
             if r.status_code == 200:
                 data = r.json()
+                # Greenhouse has no first-class workplace-type field.
+                # Some boards stash it in `metadata` as a tagged value;
+                # otherwise the location.name string carries the signal
+                # and the classifier picks it up.
+                wt_hint = None
+                for m in (data.get("metadata") or []):
+                    if not isinstance(m, dict):
+                        continue
+                    name = (m.get("name") or "").lower()
+                    val = m.get("value")
+                    if "remote" in name or "workplace" in name or "work type" in name:
+                        if isinstance(val, str):
+                            wt_hint = val
+                            break
+                        if isinstance(val, list) and val:
+                            wt_hint = str(val[0])
+                            break
                 return {
                     "company": (
                         data.get("company_name") or slug.replace("_", " ").title()
                     ),
                     "title": data.get("title", ""),
                     "location": (data.get("location") or {}).get("name", ""),
+                    "work_type": wt_hint,
                     "description": _html_to_text(data.get("content", "")),
                 }
         except Exception:
@@ -171,10 +212,14 @@ def _fetch_smartrecruiters(url: str) -> Optional[dict]:
             if val:
                 bits.append(_html_to_text(val))
         loc = data.get("location", {}) or {}
+        wt_hint = None
+        if loc.get("remote") is True:
+            wt_hint = "remote"
         return {
             "company": (data.get("company") or {}).get("name", m_co.group(1)),
             "title": data.get("name", ""),
             "location": loc.get("fullLocation") or loc.get("city", ""),
+            "work_type": wt_hint,
             "description": "\n\n".join(b for b in bits if b),
         }
     except Exception:
@@ -205,11 +250,16 @@ def _fetch_rippling(url: str) -> Optional[dict]:
             (descr.get(k) or "")
             for k in ("company", "role", "benefits", "pay")
         )
+        work_loc = job.get("workLocation") or {}
+        wt_hint = (work_loc.get("workplaceType")
+                   or work_loc.get("workType")
+                   or job.get("workplaceType"))
         return {
             "company": (api_data.get("jobBoard") or {}).get("name")
                 or (job.get("company") or {}).get("name", ""),
             "title": job.get("name") or job.get("title", ""),
-            "location": (job.get("workLocation") or {}).get("description", ""),
+            "location": work_loc.get("description", ""),
+            "work_type": wt_hint,
             "description": _html_to_text(desc_html),
         }
     except Exception:
@@ -340,11 +390,16 @@ def _fetch_jsonld(url: str) -> Optional[dict]:
                     )
             desc_html = d.get("description", "") or ""
             desc = _html_to_text(desc_html)
+            wt_hint = None
+            jlt = d.get("jobLocationType")
+            if isinstance(jlt, str) and "telecommute" in jlt.lower():
+                wt_hint = "remote"
             if desc and len(desc) >= 200:
                 return {
                     "company": company,
                     "title": d.get("title", "") or "",
                     "location": location,
+                    "work_type": wt_hint,
                     "description": desc,
                 }
     return None
@@ -389,7 +444,23 @@ def _haiku_extract_from_html(html: str, url: str) -> Optional[dict]:
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["style", "noscript", "svg", "iframe", "link"]):
         tag.decompose()
+
+    # For SPA pages whose body is empty, the only signal is embedded JSON in
+    # <script> tags. Concatenate the inner text of the high-value script tags
+    # ahead of the rest so it survives the 30K truncation.
+    json_priority: list[str] = []
+    for s in soup.find_all("script"):
+        sid = (s.get("id") or "").lower()
+        stype = (s.get("type") or "").lower()
+        if (sid in ("__next_data__", "__nuxt__", "__apollo_state__")
+                or "ld+json" in stype
+                or "application/json" in stype):
+            txt = (s.string or s.get_text("") or "")[:20_000]
+            if txt.strip():
+                json_priority.append(txt)
     cleaned_html = str(soup)
+    if json_priority:
+        cleaned_html = "\n\n".join(json_priority) + "\n\n" + cleaned_html
     if len(cleaned_html) > 30_000:
         cleaned_html = cleaned_html[:30_000]
 
@@ -408,8 +479,12 @@ def _haiku_extract_from_html(html: str, url: str) -> Optional[dict]:
             f"URL: {url}\n\n"
             f"HTML:\n{cleaned_html}\n\n"
             'Return <json>{"company": "...", "title": "...", "location": "...", '
+            '"work_type": "remote|hybrid|onsite|unknown", '
             '"description": "..."}</json>. The description should be the full job '
-            "text, plain (entities decoded), no HTML tags."
+            "text, plain (entities decoded), no HTML tags. "
+            "work_type: 'remote' if fully remote / WFH / anywhere, "
+            "'hybrid' if a mix or N days in-office, 'onsite' if office/no remote, "
+            "'unknown' if you can't tell."
         )
         resp = client.messages.create(
             model=config.EXTRACT_MODEL,
@@ -434,6 +509,7 @@ def _haiku_extract_from_html(html: str, url: str) -> Optional[dict]:
         "company":  (data.get("company")  or "").strip(),
         "title":    (data.get("title")    or "").strip(),
         "location": (data.get("location") or "").strip(),
+        "work_type": (data.get("work_type") or "").strip() or None,
         "description": desc,
     }
 
@@ -452,7 +528,10 @@ def fetch_job_posting(url: str, *, bypass_cache: bool = False) -> dict:
     if not bypass_cache:
         hit = scrape_cache.get(url)
         if hit is not None:
-            return hit
+            # Pre-existing cache entries pre-date the work_type field. Run
+            # _finalize on the way out: it preserves a normalized value if
+            # present, otherwise runs the classifier.
+            return _finalize(hit)
     info = _fetch_job_posting_uncached(url)
     scrape_cache.put(url, info)
     return info
@@ -464,35 +543,35 @@ def _fetch_job_posting_uncached(url: str) -> dict:
     if "ashbyhq.com" in host:
         info = _fetch_ashby(url)
         if info and info.get("description"):
-            return info
+            return _finalize(info)
     if "lever.co" in host:
         info = _fetch_lever(url)
         if info and info.get("description"):
-            return info
+            return _finalize(info)
     if "greenhouse.io" in host:
         info = _fetch_greenhouse(url)
         if info and info.get("description"):
-            return info
+            return _finalize(info)
     if "myworkdayjobs.com" in host:
         info = _fetch_workday(url)
         if info and info.get("description"):
-            return info
+            return _finalize(info)
     if host == "jobs.smartrecruiters.com":
         info = _fetch_smartrecruiters(url)
         if info and info.get("description"):
-            return info
+            return _finalize(info)
     if host == "ats.rippling.com":
         info = _fetch_rippling(url)
         if info and info.get("description"):
-            return info
+            return _finalize(info)
     if "oraclecloud.com" in host:
         info = _fetch_oracle_hcm(url)
         if info and info.get("description"):
-            return info
+            return _finalize(info)
     if host == "apply.workable.com":
         info = _fetch_workable(url)
         if info and info.get("description"):
-            return info
+            return _finalize(info)
 
     candidates = [url]
     if url.endswith("/application"):
@@ -505,7 +584,7 @@ def _fetch_job_posting_uncached(url: str) -> dict:
     for u in candidates:
         info = _fetch_jsonld(u)
         if info and info.get("description"):
-            return info
+            return _finalize(info)
 
     last_err: Optional[Exception] = None
     last_html: Optional[str] = None
@@ -518,7 +597,7 @@ def _fetch_job_posting_uncached(url: str) -> dict:
                 # Description is "real" if we got >= 400 chars from heuristic
                 # extraction. Otherwise stash the HTML for the Haiku fallback.
                 if len(info.get("description") or "") >= 400:
-                    return info
+                    return _finalize(info)
                 last_html = r.text
                 last_url_used = u
         except Exception as e:
@@ -528,6 +607,6 @@ def _fetch_job_posting_uncached(url: str) -> dict:
     if last_html:
         haiku_info = _haiku_extract_from_html(last_html, last_url_used or url)
         if haiku_info and haiku_info.get("description"):
-            return haiku_info
+            return _finalize(haiku_info)
 
     raise RuntimeError(f"Could not fetch job page: {url} ({last_err})")

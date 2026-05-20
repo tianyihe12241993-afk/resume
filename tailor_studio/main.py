@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -15,6 +16,19 @@ from .db import Batch, JobUrl, Profile, get_session, init_db
 
 
 app = FastAPI(title="resume-tailor-studio", version="0.1.0")
+
+# Allow the Chrome extension popup (origin = chrome-extension://<id>) to call
+# the API with the session cookie. allow_origin_regex covers any extension ID
+# since the user side-loads the extension and Chrome assigns a fresh ID each
+# install.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"chrome-extension://.*",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(api.public_router)
 app.include_router(api.router)
 
@@ -22,6 +36,54 @@ app.include_router(api.router)
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+    _start_auto_prune()
+    # Re-enqueue jobs left in pending / in-flight states by a previous
+    # process. Without this, server restarts strand the entire in-memory
+    # ThreadPoolExecutor queue.
+    try:
+        from . import pipeline
+        n = pipeline.requeue_orphans()
+        if n:
+            import logging
+            logging.getLogger("tailor_studio.startup").info(
+                "Re-queued %d orphaned tailoring jobs from previous process", n,
+            )
+    except Exception:
+        import logging, traceback
+        logging.getLogger("tailor_studio.startup").warning(
+            "Orphan-requeue failed:\n%s", traceback.format_exc(),
+        )
+
+
+def _start_auto_prune() -> None:
+    """Spawn a daemon thread that runs the prune script once per day.
+
+    Keeps generated .docx/.pdf and Claude caches under control without
+    requiring an external cron. Threshold: 7 days. First sweep happens
+    60 seconds after server start; then every 24 hours."""
+    import threading
+    import time as _time
+    import logging
+
+    log = logging.getLogger("tailor_studio.prune")
+
+    def _runner() -> None:
+        # Brief grace period after boot so the first sweep doesn't fight
+        # with init_db() / table migrations.
+        _time.sleep(60)
+        while True:
+            try:
+                from scripts.prune_old_outputs import main as prune_main
+                prune_main(["--days", "7"])
+            except Exception as e:  # pragma: no cover — daemon must not die
+                log.warning("auto-prune failed: %s", e)
+            # 24h between sweeps. Use small wakeups so process shutdown is
+            # responsive rather than blocking for a full day.
+            for _ in range(24 * 60):
+                _time.sleep(60)
+
+    t = threading.Thread(target=_runner, name="auto-prune", daemon=True)
+    t.start()
 
 
 def _slug(text: str) -> str:

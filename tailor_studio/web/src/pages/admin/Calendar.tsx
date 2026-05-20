@@ -2,6 +2,19 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import clsx from 'clsx'
 import { api, type CalendarData } from '@/lib/api'
+import { paletteForName } from '@/components/charts'
+
+// Tailwind palette → bg/text class pair, used for the batch chips on the
+// calendar so each profile reads consistently with its avatar elsewhere.
+const PROFILE_CHIP: Record<string, { idle: string; hit: string }> = {
+  indigo:  { idle: 'bg-indigo-100  text-indigo-800  hover:bg-indigo-200',  hit: 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200' },
+  emerald: { idle: 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200', hit: 'bg-emerald-200 text-emerald-900 hover:bg-emerald-300' },
+  amber:   { idle: 'bg-amber-100   text-amber-800   hover:bg-amber-200',   hit: 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200' },
+  rose:    { idle: 'bg-rose-100    text-rose-800    hover:bg-rose-200',    hit: 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200' },
+  violet:  { idle: 'bg-violet-100  text-violet-800  hover:bg-violet-200',  hit: 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200' },
+  sky:     { idle: 'bg-sky-100     text-sky-800     hover:bg-sky-200',     hit: 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200' },
+  fuchsia: { idle: 'bg-fuchsia-100 text-fuchsia-800 hover:bg-fuchsia-200', hit: 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200' },
+}
 
 export default function CalendarPage() {
   const [sp, setSp] = useSearchParams()
@@ -16,11 +29,13 @@ export default function CalendarPage() {
 
   return (
     <>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">
-          {data.month_name} {data.year}
-          <span className="text-sm font-normal text-gray-400 ml-2">US Pacific</span>
-        </h1>
+      <div className="flex items-end justify-between mb-4 flex-wrap gap-3">
+        <div>
+          <p className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-0.5">Calendar · US Pacific</p>
+          <h1 className="text-2xl font-bold text-gray-900">
+            {data.month_name} <span className="text-gray-400 font-normal">{data.year}</span>
+          </h1>
+        </div>
         <div className="flex items-center gap-1">
           <button onClick={() => setSp({ year: String(data.prev.year), month: String(data.prev.month) })}
                   className="btn-secondary text-sm px-3 py-1.5">← Prev</button>
@@ -74,12 +89,13 @@ export default function CalendarPage() {
                   <div className="flex-1 space-y-0.5">
                     {batches.map((b) => {
                       const bHit = b.done > 0 && b.applied >= b.done
+                      const palette = paletteForName(b.profile_name)
+                      const chip = PROFILE_CHIP[palette] || PROFILE_CHIP.indigo
                       return (
                         <Link key={b.id} to={`/admin/batches/${b.id}`}
                               className={clsx(
                                 'block text-[10.5px] leading-tight rounded px-1.5 py-0.5 transition truncate',
-                                bHit ? 'bg-green-100 text-green-800 hover:bg-green-200'
-                                     : 'bg-brand-100 text-brand-800 hover:bg-brand-200',
+                                bHit ? chip.hit : chip.idle,
                               )}>
                           <span className="font-semibold">{b.profile_name}</span>
                           <span className="ml-1 opacity-70">{b.applied}/{b.done}</span>

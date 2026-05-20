@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Tailor Studio</title>
+  <style>
+    :root { color-scheme: light; }
+    html, body { margin: 0; padding: 0; font: 13px/1.4 -apple-system, system-ui, sans-serif; color: #1f2937; }
+    body { width: 460px; padding: 12px 14px 14px; background: #fff; }
+    h1 { font-size: 14px; margin: 0 0 10px; color: #111827; display: flex; align-items: center; gap: 8px; }
+    h1 .count { font-weight: 500; color: #6b7280; font-size: 12px; }
+    .row { display: flex; gap: 12px; }
+    .col { flex: 1; min-width: 0; }
+    .col h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: #6b7280; margin: 0 0 6px; }
+    ul { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 6px; background: #fafafa; }
+    li { padding: 5px 8px; border-bottom: 1px solid #f3f4f6; font-size: 12px; }
+    li:last-child { border-bottom: 0; }
+    li label { display: flex; gap: 6px; align-items: flex-start; cursor: pointer; }
+    li input { margin-top: 3px; flex-shrink: 0; }
+    li .title { color: #111827; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
+    li .host { color: #9ca3af; font-size: 10px; margin-top: 1px; }
+    .actions { margin-top: 12px; display: flex; gap: 8px; align-items: center; }
+    button { background: #4f46e5; color: #fff; border: 0; padding: 8px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13px; }
+    button:disabled { background: #c7d2fe; cursor: default; }
+    button.secondary { background: #fff; color: #4f46e5; border: 1px solid #c7d2fe; }
+    .opt { font-size: 12px; color: #4b5563; display: flex; align-items: center; gap: 5px; }
+    #status { font-size: 12px; color: #6b7280; min-height: 16px; margin-top: 6px; }
+    .err { color: #b91c1c; }
+    .ok { color: #15803d; }
+    .empty { padding: 18px; color: #9ca3af; font-size: 12px; text-align: center; }
+    .results { margin-top: 10px; padding: 8px 10px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; font-size: 12px; line-height: 1.45; color: #166534; }
+    .results.err { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+  </style>
+</head>
+<body>
+  <h1>Tailor Studio <span class="count" id="count"></span></h1>
+
+  <div class="row">
+    <div class="col">
+      <h2>URLs (<span id="urls-count">0</span>)</h2>
+      <ul id="urls"><li class="empty">Reading tabs…</li></ul>
+    </div>
+    <div class="col" style="max-width: 170px;">
+      <h2>Profiles</h2>
+      <ul id="profiles"><li class="empty">Loading…</li></ul>
+    </div>
+  </div>
+
+  <label class="opt" style="margin-top:10px;">
+    <input type="checkbox" id="close-after" checked> Close queued tabs after success
+  </label>
+
+  <div class="actions">
+    <button id="queue" disabled>Queue</button>
+    <button id="settings" class="secondary" type="button">Server…</button>
+    <span id="status"></span>
+  </div>
+
+  <div id="results" class="results" style="display:none;"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

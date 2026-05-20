@@ -31,7 +31,7 @@ from . import config, storage
 from .db import (
     Batch, JobUrl, Profile, SessionLocal,
     STATUS_ANALYZING, STATUS_DONE, STATUS_ERROR, STATUS_FETCHING,
-    STATUS_NEEDS_JD, STATUS_TAILORING,
+    STATUS_NEEDS_JD, STATUS_PENDING, STATUS_TAILORING,
 )
 
 
@@ -128,14 +128,15 @@ def _apply_claimed_terms(rows, claimed_terms):
     return [(c, i) for c, i in out]
 
 
-def _resolve_jd(ju: JobUrl) -> tuple[str, str, str, str]:
-    """Return (jd_text, title, company, location). Scrape if needed."""
+def _resolve_jd(ju: JobUrl) -> tuple[str, str, str, str, Optional[str]]:
+    """Return (jd_text, title, company, location, work_type). Scrape if needed."""
     if ju.description and len(ju.description.strip()) >= 200:
         return (
             ju.description,
             ju.title or "",
             ju.company or "",
             ju.location or "",
+            ju.work_type,
         )
     raw = fetch_job_posting(ju.url)
     info = normalize_job_info(raw, url=ju.url)
@@ -144,6 +145,7 @@ def _resolve_jd(ju: JobUrl) -> tuple[str, str, str, str]:
         info.get("title", "") or "",
         info.get("company", "") or "",
         info.get("location", "") or "",
+        info.get("work_type"),
     )
 
 
@@ -167,7 +169,7 @@ def _run_single(job_url_id: int) -> None:
         ju.error_message = None
         db.commit()
         try:
-            jd_text, title, company, location = _resolve_jd(ju)
+            jd_text, title, company, location, work_type = _resolve_jd(ju)
         except Exception as e:
             ju.status = STATUS_NEEDS_JD
             ju.error_message = f"Scrape failed: {e}. Paste JD manually."
@@ -184,6 +186,8 @@ def _run_single(job_url_id: int) -> None:
             ju.company = company
         if location and not ju.location:
             ju.location = location
+        if work_type and not ju.work_type:
+            ju.work_type = work_type
         if not ju.description:
             ju.description = jd_text
         db.commit()
@@ -212,10 +216,23 @@ def _run_single(job_url_id: int) -> None:
                 ]
             except (TypeError, ValueError):
                 claimed_for_rewriter = []
+        # Lazy-extract a deep candidate profile from the base resume — every
+        # named + implicit skill, every signature system, every quantified
+        # result. The bullet rewriter uses this as additional grounding so
+        # individual bullets can speak to JD skills documented elsewhere in
+        # the resume but not the bullet itself.
+        candidate_profile = None
+        try:
+            from app.profile_extractor import extract_candidate_profile
+            candidate_profile = extract_candidate_profile(docx_text(src_docx))
+        except Exception:
+            candidate_profile = None
+
         bullet_results = rewrite_and_validate(
             resume_struct, spec, cmap,
             claimed_terms=claimed_for_rewriter,
             jd_text=jd_text,
+            candidate_profile=candidate_profile,
         )
         bullets_per_job = [[] for _ in resume_struct.jobs]
         for r in bullet_results:
@@ -324,3 +341,35 @@ def _get_executor() -> ThreadPoolExecutor:
 
 def enqueue(job_url_id: int) -> None:
     _get_executor().submit(_run_single, job_url_id)
+
+
+def requeue_orphans() -> int:
+    """On server startup, re-enqueue jobs left mid-flight by a previous
+    process. The thread-pool queue is in-memory; if uvicorn restarts while
+    any rows are pending / fetching / analyzing / tailoring, those rows
+    sit in the DB but nothing is picking them up.
+
+    Resets such rows to STATUS_PENDING (clearing any partial error message)
+    and submits them to the executor. Returns the count.
+    """
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(JobUrl)
+            .filter(JobUrl.status.in_([
+                STATUS_PENDING, STATUS_FETCHING, STATUS_ANALYZING, STATUS_TAILORING,
+            ]))
+            .all()
+        )
+        ids: list[int] = []
+        for ju in rows:
+            ju.status = STATUS_PENDING
+            ju.error_message = None
+            ids.append(ju.id)
+        if ids:
+            db.commit()
+        for jid in ids:
+            enqueue(jid)
+        return len(ids)
+    finally:
+        db.close()

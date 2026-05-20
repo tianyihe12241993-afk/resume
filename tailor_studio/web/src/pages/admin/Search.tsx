@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams, Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { Search as SearchIcon, ExternalLink, Download } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Search as SearchIcon, ExternalLink, Download, RotateCw } from 'lucide-react'
+import { Avatar } from '@/components/charts'
 import clsx from 'clsx'
 import { api, type Job } from '@/lib/api'
 import { Chip } from '@/components/ui'
@@ -30,13 +31,23 @@ const STATUS_OPTIONS = [
   { v: 'error', t: 'error' },
 ]
 
+const WORK_TYPE_OPTIONS = [
+  { v: '', t: 'all' },
+  { v: 'remote', t: 'remote' },
+  { v: 'hybrid', t: 'hybrid' },
+  { v: 'onsite', t: 'onsite' },
+  { v: 'unknown', t: 'unknown' },
+]
+
 export default function SearchPage() {
   const [params, setParams] = useSearchParams()
   const initialQ = params.get('q') ?? ''
   const initialStatus = params.get('status') ?? ''
+  const initialWorkType = params.get('work_type') ?? ''
 
   const [q, setQ] = useState(initialQ)
   const [status, setStatus] = useState(initialStatus)
+  const [workType, setWorkType] = useState(initialWorkType)
   const [debouncedQ, setDebouncedQ] = useState(initialQ)
 
   useEffect(() => {
@@ -49,16 +60,18 @@ export default function SearchPage() {
     const next = new URLSearchParams()
     if (debouncedQ.trim()) next.set('q', debouncedQ.trim())
     if (status) next.set('status', status)
+    if (workType) next.set('work_type', workType)
     setParams(next, { replace: true })
-  }, [debouncedQ, status, setParams])
+  }, [debouncedQ, status, workType, setParams])
 
   const { data, isFetching, error } = useQuery({
-    queryKey: ['admin/search', debouncedQ, status],
+    queryKey: ['admin/search', debouncedQ, status, workType],
     enabled: debouncedQ.trim().length > 0,
     queryFn: () => {
       const qs = new URLSearchParams()
       qs.set('q', debouncedQ.trim())
       if (status) qs.set('status', status)
+      if (workType) qs.set('work_type', workType)
       return api.get<SearchResponse>('/api/admin/search?' + qs.toString())
     },
     staleTime: 5_000,
@@ -97,6 +110,16 @@ export default function SearchPage() {
             </label>
             <select value={status} onChange={(e) => setStatus(e.target.value)} className="input">
               {STATUS_OPTIONS.map((o) => (
+                <option key={o.v + o.t} value={o.v}>{o.t}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1 block">
+              Work type
+            </label>
+            <select value={workType} onChange={(e) => setWorkType(e.target.value)} className="input">
+              {WORK_TYPE_OPTIONS.map((o) => (
                 <option key={o.v + o.t} value={o.v}>{o.t}</option>
               ))}
             </select>
@@ -154,9 +177,57 @@ function Th({ className, children }: { className?: string; children: React.React
   return <th className={clsx('px-3 py-2.5 font-semibold', className)}>{children}</th>
 }
 
+function UploadVerdictPill({
+  match, filename,
+}: { match: 'tailored' | 'base' | 'other' | null | undefined; filename?: string | null }) {
+  if (!match) return null
+  const meta = match === 'tailored'
+    ? { icon: '✓', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200', label: 'Tailored' }
+    : match === 'base'
+    ? { icon: '⚠', cls: 'bg-amber-50 text-amber-700 border-amber-200', label: 'Base resume' }
+    : { icon: '✕', cls: 'bg-rose-50 text-rose-700 border-rose-200', label: 'Other file' }
+  const fname = filename || '(unknown)'
+  return (
+    <span
+      title={`${meta.label} uploaded: ${fname}`}
+      className={clsx(
+        'inline-flex items-center gap-1 max-w-[160px] px-1.5 py-0.5 rounded border text-[10px] font-medium',
+        meta.cls,
+      )}
+    >
+      <span className="font-bold flex-shrink-0">{meta.icon}</span>
+      <span className="truncate">{fname}</span>
+    </span>
+  )
+}
+
+
+function WorkTypeBadge({ value }: { value: 'remote' | 'hybrid' | 'onsite' | null | undefined }) {
+  if (!value) return null
+  const cls = value === 'remote'
+    ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
+    : value === 'hybrid'
+    ? 'bg-amber-100 text-amber-700 border-amber-200'
+    : 'bg-rose-100 text-rose-700 border-rose-200'
+  const label = value[0].toUpperCase() + value.slice(1)
+  return (
+    <span className={clsx(
+      'inline-flex items-center px-1.5 py-0.5 mr-1.5 rounded border text-[10px] font-semibold uppercase tracking-wide align-middle',
+      cls,
+    )} title={`Work type: ${label}`}>
+      {label}
+    </span>
+  )
+}
+
 function SearchRow({ result, highlight }: { result: SearchResult; highlight: string }) {
   const { job, batch, profile } = result
   const isDone = job.status === 'done'
+  const qc = useQueryClient()
+  const retry = useMutation({
+    mutationFn: () => api.post(`/api/admin/batches/${batch.id}/jobs/${job.id}/retry`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/search'] }),
+  })
   return (
     <tr className="hover:bg-slate-50/80 transition">
       <td className="px-3 py-2 text-gray-900 truncate max-w-[170px]" title={job.company || ''}>
@@ -166,16 +237,27 @@ function SearchRow({ result, highlight }: { result: SearchResult; highlight: str
         <Link to={`/admin/batches/${batch.id}`} className="hover:text-brand-700 hover:underline">
           <Highlight text={job.title || '(no title)'} term={highlight} />
         </Link>
-        {job.location && (
-          <p className="text-xs text-gray-400 mt-0.5"><Highlight text={job.location} term={highlight} /></p>
+        {(job.location || job.work_type) && (
+          <p className="text-xs text-gray-400 mt-0.5">
+            <WorkTypeBadge value={job.work_type} />
+            {job.location && <Highlight text={job.location} term={highlight} />}
+          </p>
         )}
       </td>
       <td className="px-3 py-2 text-xs">
-        <Link to={`/admin/profiles/${profile.id}`} className="text-brand-700 hover:underline truncate inline-block max-w-full" title={profile.name}>
-          {profile.name}
+        <Link to={`/admin/profiles/${profile.id}`}
+              className="inline-flex items-center gap-1.5 max-w-full hover:opacity-80 transition"
+              title={profile.name}>
+          <Avatar name={profile.name} size={20} />
+          <span className="text-gray-700 truncate">{profile.name}</span>
         </Link>
       </td>
-      <td className="px-3 py-2"><Chip status={job.status} /></td>
+      <td className="px-3 py-2">
+        <div className="flex flex-col gap-1 items-start">
+          <Chip status={job.status} />
+          <UploadVerdictPill match={job.upload_match} filename={job.upload_filename} />
+        </div>
+      </td>
       <td className="px-3 py-2 text-xs text-gray-500">{formatDateTime(batch.created_at)}</td>
       <td className="px-3 py-2 text-center">
         <a href={job.url} target="_blank" rel="noopener noreferrer"
@@ -189,6 +271,16 @@ function SearchRow({ result, highlight }: { result: SearchResult; highlight: str
              className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded transition">
             <Download className="w-3 h-3" /> .docx
           </a>
+        ) : isDone && !job.has_docx ? (
+          <button
+            onClick={() => retry.mutate()}
+            disabled={retry.isPending}
+            title="Resume file was pruned. Re-tailor and regenerate the .docx."
+            className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-semibold text-brand-700 bg-brand-50 hover:bg-brand-100 border border-brand-200 rounded transition disabled:opacity-60"
+          >
+            <RotateCw className={'w-3 h-3 ' + (retry.isPending ? 'animate-spin' : '')} />
+            {retry.isPending ? 'Queuing…' : 'Re-tailor'}
+          </button>
         ) : <span className="text-gray-300 text-xs">—</span>}
       </td>
     </tr>

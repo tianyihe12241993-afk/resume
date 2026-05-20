@@ -20,7 +20,7 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 PORT = int(os.getenv("STUDIO_PORT", "8001"))
 HOST = os.getenv("STUDIO_HOST", "127.0.0.1")
-WORKERS = int(os.getenv("STUDIO_WORKERS", "4"))
+WORKERS = int(os.getenv("STUDIO_WORKERS", "8"))
 MAX_RESUME_BYTES = 10 * 1024 * 1024
 MAX_URLS_PER_BATCH = int(os.getenv("STUDIO_MAX_URLS_PER_BATCH", "200"))
 

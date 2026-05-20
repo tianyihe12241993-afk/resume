@@ -80,7 +80,9 @@ MUST_HAVE_PHRASES — extract literal substrings from the JD that an ATS keyword
 CANONICALIZATION:
 - Use the most common canonical spelling: "PostgreSQL" not "postgres", "Node.js" not "nodejs", "REST APIs" not "REST".
 - Deduplicate: a term and its alias do NOT both appear as separate hard_skills entries.
-- Cap hard_skills at 25 and soft_signals at 10. Quality over quantity.
+- Extract every hard skill in the JD — do not cap. Soft signals capped at 10.
+- Err on the side of completeness: include every named technology, framework, language,
+  database, platform, methodology, and tool that the JD mentions, even briefly.
 """
 
 
@@ -111,8 +113,15 @@ def _extract_tagged_json(text: str) -> dict:
     raise ValueError(f"No JSON in response: {text[:400]}")
 
 
+# Bump this when the analyzer prompt changes — busts the on-disk spec cache
+# so the next read for any JD re-runs Haiku with the new instructions.
+_ANALYZER_PROMPT_VERSION = "2"
+
+
 def _jd_hash(jd_text: str, title: str, company: str) -> str:
     h = hashlib.sha256()
+    h.update(_ANALYZER_PROMPT_VERSION.encode("utf-8"))
+    h.update(b"\x00")
     h.update(title.strip().encode("utf-8"))
     h.update(b"\x00")
     h.update(company.strip().encode("utf-8"))

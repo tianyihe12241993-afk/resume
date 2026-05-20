@@ -13,6 +13,8 @@ data/adjacency_cache/
 data/bullet_rewrite_cache/
 data/tailor_cache/
 data/scrape_cache/
+data/profile_cache/
+data/answer_cache/
 
 # --- the live SQLite DB (contains user accounts + every JD/profile) ---
 data/app.db

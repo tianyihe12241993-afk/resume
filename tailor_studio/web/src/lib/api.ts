@@ -87,14 +87,23 @@ export interface Job {
   company: string | null
   title: string | null
   location: string | null
+  work_type: 'remote' | 'hybrid' | 'onsite' | null
   description: string | null
   error_message: string | null
   application_status: string
   applied_at: string | null
   application_note: string | null
   application_source?: string | null
+  apply_count?: number
   has_docx: boolean
   download_count: number
+  upload_filename?: string | null
+  upload_match?: 'tailored' | 'base' | 'other' | null
+  upload_observed_at?: string | null
+  note?: string | null
+  note_updated_at?: string | null
+  note_seen_at?: string | null
+  has_unread_note?: boolean
   // Constrained-rewrite pipeline outputs (only present after status === 'done').
   coverage_initial?: CoverageReport | null
   coverage_final?: CoverageReport | null
@@ -109,8 +118,28 @@ export interface BatchSummary {
 export interface ProfileStatus {
   profile: { id: number; name: string; has_base_resume: boolean }
   today_batch: { id: number; created_at: string } | null
-  summary: BatchSummary
-  trend: number[]       // last 7 days applied count, oldest → newest
+  summary: BatchSummary    // today only
+  week: BatchSummary       // last 7 PT days
+  trend: number[]          // last 7 days applied count, oldest → newest
+}
+
+export interface TodayJobRow {
+  job_id: number
+  batch_id: number
+  profile_id: number
+  profile_name: string
+  company: string | null
+  title: string | null
+  location: string | null
+  work_type: 'remote' | 'hybrid' | 'onsite' | null
+  url: string
+  status: JobStatus
+  application_status: string
+  upload_match: 'tailored' | 'base' | 'other' | null
+  apply_count: number
+  applied_at: string | null
+  created_at: string
+  has_unread_note: boolean
 }
 
 export interface AdminDashboard {
@@ -119,6 +148,7 @@ export interface AdminDashboard {
   agg: BatchSummary
   agg_trend: number[]
   trend_dates: string[]
+  today_jobs: TodayJobRow[]
   ready_profiles: Profile[]
   has_any_profile: boolean
 }

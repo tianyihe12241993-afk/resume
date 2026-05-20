@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import { api, type ProfileDetail } from '@/lib/api'
 import { Alert } from '@/components/ui'
+import { Avatar } from '@/components/charts'
 import { formatDateTime } from '@/lib/format'
 
 export default function ProfileDetailPage() {
@@ -100,34 +101,37 @@ export default function ProfileDetailPage() {
       </Link>
 
       {/* ── Profile heading + name editor ─────────────────────────── */}
-      <div className="mb-6">
-        {editingName ? (
-          <form className="flex items-center gap-2"
-                onSubmit={(e) => {
-                  e.preventDefault()
-                  if (nameDirty) saveProfile.mutate({ name: name.trim() })
-                  setEditingName(false)
-                }}>
-            <input autoFocus className="input text-xl font-bold flex-1 max-w-md"
-                   value={name} onChange={(e) => setName(e.target.value)}
-                   onKeyDown={(e) => { if (e.key === 'Escape') { setName(profile.name); setEditingName(false) } }} />
-            <button className="btn-primary text-sm">Save</button>
-            <button type="button" onClick={() => { setName(profile.name); setEditingName(false) }}
-                    className="btn-secondary text-sm">Cancel</button>
-          </form>
-        ) : (
-          <div className="flex items-center gap-2 group">
-            <h1 className="text-2xl font-bold text-gray-900">{profile.name}</h1>
-            <button onClick={() => setEditingName(true)}
-                    title="Rename profile"
-                    className="text-gray-400 hover:text-brand-600 transition">
-              <Pencil className="w-4 h-4" />
-            </button>
-          </div>
-        )}
-        <p className="text-xs text-gray-400 mt-1">
-          Created {formatDateTime(profile.created_at)} · {profile.batch_count} batches
-        </p>
+      <div className="flex items-center gap-4 mb-6">
+        <Avatar name={profile.name} size={56} />
+        <div className="flex-1 min-w-0">
+          {editingName ? (
+            <form className="flex items-center gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    if (nameDirty) saveProfile.mutate({ name: name.trim() })
+                    setEditingName(false)
+                  }}>
+              <input autoFocus className="input text-xl font-bold flex-1 max-w-md"
+                     value={name} onChange={(e) => setName(e.target.value)}
+                     onKeyDown={(e) => { if (e.key === 'Escape') { setName(profile.name); setEditingName(false) } }} />
+              <button className="btn-primary text-sm">Save</button>
+              <button type="button" onClick={() => { setName(profile.name); setEditingName(false) }}
+                      className="btn-secondary text-sm">Cancel</button>
+            </form>
+          ) : (
+            <div className="flex items-center gap-2 group">
+              <h1 className="text-2xl font-bold text-gray-900">{profile.name}</h1>
+              <button onClick={() => setEditingName(true)}
+                      title="Rename profile"
+                      className="text-gray-400 hover:text-brand-600 transition">
+                <Pencil className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+          <p className="text-xs text-gray-400 mt-1">
+            Created {formatDateTime(profile.created_at)} · {profile.batch_count} batches
+          </p>
+        </div>
       </div>
 
       {/* ── Base resume ───────────────────────────────────────────── */}

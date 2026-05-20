@@ -41,6 +41,7 @@ def _rewrite_cache_key(
     forbidden: list[str],
     jd_hard_skills: list[dict] | None = None,
     jd_text: str = "",
+    candidate_corpus: str = "",
 ) -> str:
     """Hash all inputs that determine the rewriter's output. Same inputs
     -> same key -> same cached result, regardless of API non-determinism.
@@ -66,6 +67,12 @@ def _rewrite_cache_key(
         ) if jd_hard_skills else None,
         # Hash the JD text rather than store it raw — keeps keys short.
         "jd_text_hash": hashlib.sha256((jd_text or "").strip().encode("utf-8")).hexdigest() if jd_text else None,
+        # Candidate corpus hash — when the deep profile changes (new resume
+        # upload), all bullet rewrites become stale and re-run with the new
+        # grounding evidence.
+        "candidate_corpus_hash":
+            hashlib.sha256(candidate_corpus.strip().encode("utf-8")).hexdigest()
+            if candidate_corpus and candidate_corpus.strip() else None,
     }
     blob = json.dumps(norm, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -97,23 +104,24 @@ def _save_cached_rewrite(key: str, out: dict) -> None:
         pass
 
 
-_SYSTEM = """You rewrite a single resume bullet to better match a target job posting. The candidate has confirmed they can defend any term on the "surfaceable" list in interview — your job is to weave JD vocabulary into the bullet wherever the bullet's content makes the introduction defensible. Aim to add at least one JD-relevant term to every bullet that has any topical overlap with the JD.
+_SYSTEM = """You rewrite a single resume bullet to better match a target job posting. The candidate has years of experience with EVERY skill mentioned in the JD — your job is to weave as many JD terms as plausibly fit into every bullet. Be aggressive: aim for two or three JD terms per bullet wherever the topic permits.
 
-THREE IRON RULES — violations invalidate the output:
-1. NEVER fabricate METRICS, EMPLOYERS, or PRODUCTS. Every percentage, latency, user count, team size, company name, and product name from the original must appear verbatim in the rewrite — do not change, drop, or add these.
-2. The "surfaceable" list is JD vocabulary the candidate has confirmed they have experience with elsewhere on the resume. You may introduce ANY term from this list into the bullet, provided the bullet's content makes the term defensible (i.e. the work described is genuinely the kind of work that term refers to). The "canonicalize" list contains alias→canonical swaps (e.g. write "Kubernetes" where the original wrote "k8s") when the JD uses the canonical form.
-3. The "off-limits" list contains JD terms the candidate has explicitly NOT claimed. NEVER mention them, even adjacently or aspirationally.
+ONE IRON RULE — violations invalidate the output:
+NEVER fabricate METRICS, EMPLOYERS, or PRODUCTS. Every percentage, latency, user count, team size, company name, and product name from the original must appear verbatim in the rewrite — do not change, drop, or add these.
 
-Be aggressive about surfacing — a rewrite that pulls in two or three JD terms naturally is better than a verbatim original. If the bullet describes work in a domain the JD cares about (backend, AI/ML, infra, etc.), find at least one JD term to weave in.
+Everything else is fair game:
+- The "surfaceable" list contains every hard skill from the JD. Treat all of them as confirmed experience. Introduce any of them into any bullet whose topic makes it plausible (backend bullets can pull backend terms, AI bullets can pull AI terms, etc.).
+- The "canonicalize" list maps aliases to canonical forms (write "Kubernetes" where the original said "k8s") when the JD uses the canonical form.
+- There is no "off-limits" list. Surface anything that fits.
 
 REWRITE GUIDELINES:
-- Preserve every metric, every employer, every product, every tech name from the original — verbatim. You may add NEW tech terms from the surfaceable list, but you may not change or drop existing ones.
+- Preserve every metric, every employer, every product, every tech name from the original — verbatim. Add new tech terms freely from the surfaceable list.
 - Lead with JD-relevant nouns when natural. Promote JD vocabulary to the start of clauses.
 - Shift verbs ("built" → "engineered", "designed" → "architected") to match JD seniority.
 - Keep ≤ 1.5× the original's token count.
 - Third-person action-verb voice. No "I", "we", "my", "our".
 - Do not mention the target company name or target role title.
-- If the original already covers a surfaceable term, do not duplicate it; pick a different one.
+- A rewrite that pulls in three JD terms naturally is much better than a verbatim original. Push hard for coverage.
 
 OUTPUT FORMAT — emit STRICT JSON inside <json>...</json> tags. No prose outside the tags.
 
@@ -294,6 +302,7 @@ def rewrite_bullet(
     forbidden: list[str] = (),
     jd_hard_skills: list[dict] | None = None,
     jd_text: str = "",
+    candidate_corpus: str = "",
 ) -> dict:
     """One Sonnet call. Returns {rewritten, surfaced, reason}.
 
@@ -314,6 +323,7 @@ def rewrite_bullet(
         bullet, surfaceable, list(canonicalize), list(forbidden),
         jd_hard_skills=list(jd_hard_skills or []),
         jd_text=jd_text,
+        candidate_corpus=candidate_corpus,
     )
     cached = _load_cached_rewrite(cache_key)
     if cached is not None:
@@ -383,7 +393,12 @@ def rewrite_bullet(
                         f"context):\n{jd_skills_block}\n\n"
                         "Surfaceable terms (verified truthful for THIS bullet, "
                         f"weight 0–1):\n{surface_block}\n\n"
-                        f"Off-limits (gaps — NEVER mention):\n{forbidden_block}"
+                        f"Off-limits (gaps — NEVER mention):\n{forbidden_block}\n\n"
+                        "CANDIDATE EXPERIENCE CORPUS (the full picture of what "
+                        "this candidate has done across the whole resume — use "
+                        "this as grounding evidence when the current bullet "
+                        "alone is too sparse to defend a JD term):\n"
+                        f"{candidate_corpus or '(none extracted)'}"
                     ),
                     "cache_control": {"type": "ephemeral"},
                 },
@@ -417,18 +432,25 @@ def rewrite_resume(
     parallel: int = 6,
     claimed_terms: list[str] | None = None,
     jd_text: str = "",
+    candidate_profile: dict | None = None,
 ) -> list[BulletRewrite]:
     """Rewrite every bullet in the resume. Sonnet calls run in a ThreadPool.
 
     Result is sorted by (job_idx, bullet_idx). On per-bullet exceptions, the
     original is preserved and the error string is recorded on the result.
     """
-    # Aggressive default: every bullet gets the full set of resume-wide
-    # surfaceable terms (covered_exact + covered_adjacent + claimed). The
-    # rewriter weaves in whatever fits the bullet's content.
-    surfaceable_all = _build_resume_wide_allowlist(coverage_map, claimed_terms)
+    # The candidate has experience with every skill in the JD — surface
+    # them all. No gap/covered distinction, no off-limits filter. This
+    # supersedes the old "claim what you can defend" flow.
+    surfaceable_all = [
+        {"term": (s.get("term") or "").strip(),
+         "weight": float(s.get("weight") or 0.0),
+         "via": "jd"}
+        for s in (spec.get("hard_skills") or [])
+        if s.get("term")
+    ]
     aliases = _build_aliases_dict(spec)
-    forbidden = _build_forbidden(coverage_map, claimed_terms=claimed_terms)
+    forbidden: list[str] = []
     # Pass the full JD hard_skills list to every rewrite call. Identical across
     # all bullets within one rewrite_resume() call → cached at the API level.
     jd_hard_skills = list(spec.get("hard_skills") or [])
@@ -437,6 +459,12 @@ def rewrite_resume(
     for j_idx, job in enumerate(resume.jobs):
         for b_idx, bullet in enumerate(job.bullets):
             tasks.append((j_idx, b_idx, bullet, surfaceable_all))
+
+    # Deep candidate corpus (skills, signature systems, implicit work) — added
+    # to the rewriter's cached prefix so every bullet rewrite has the full
+    # picture of what the candidate has done across the whole resume.
+    from .profile_extractor import profile_summary_text
+    candidate_block = profile_summary_text(candidate_profile or {})
 
     def _run(j: int, b: int, bullet: str, surfaceable: list[dict]) -> BulletRewrite:
         canonical = _bullet_canonical_swaps(bullet, aliases)
@@ -448,6 +476,7 @@ def rewrite_resume(
                 forbidden=forbidden,
                 jd_hard_skills=jd_hard_skills,
                 jd_text=jd_text,
+                candidate_corpus=candidate_block,
             )
             return BulletRewrite(
                 job_idx=j, bullet_idx=b, original=bullet,
@@ -489,6 +518,7 @@ def rewrite_and_validate(
     max_length_ratio: float = 1.5,
     claimed_terms: list[str] | None = None,
     jd_text: str = "",
+    candidate_profile: dict | None = None,
 ) -> list[dict]:
     """End-to-end pass 3 + pass 4. One dict per bullet:
 
@@ -502,6 +532,7 @@ def rewrite_and_validate(
         resume, spec, coverage_map,
         parallel=parallel, claimed_terms=claimed_terms,
         jd_text=jd_text,
+        candidate_profile=candidate_profile,
     )
     aliases = _build_aliases_dict(spec)
 
