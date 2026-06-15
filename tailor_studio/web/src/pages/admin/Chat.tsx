@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Send, Reply, X, Bell } from 'lucide-react'
+import { Send, Reply, X, Bell, Smile } from 'lucide-react'
 import clsx from 'clsx'
 import { api } from '@/lib/api'
 import { Avatar } from '@/components/charts'
@@ -15,11 +15,25 @@ interface ChatMsg {
 }
 interface HistoryResp {
   me: { id: number; name: string }
+  gif_enabled?: boolean
   messages: ChatMsg[]
 }
 interface Member { id: number; name: string }
+interface Gif { id: string; preview: string; url: string }
 
 const MENTION_RE = /@(all|everyone|[A-Za-z0-9._-]+)/g
+// A message that is exactly an image/GIF URL renders as an image.
+const IMG_URL_RE = /^https?:\/\/\S+\.(?:gif|png|jpe?g|webp)(?:\?\S*)?$/i
+
+const EMOJI_GROUPS: Record<string, string> = {
+  Smileys: '😀 😃 😄 😁 😆 😅 😂 🤣 🙂 🙃 😉 😊 😇 🥰 😍 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🥳 🤩 😏 😒 😞 😔 😟 😕 🙁 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤔 🫡 🤗 🤭 🤫 😬 🙄 😴 🤤 😪 😵 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕',
+  Gestures: '👍 👎 👌 🤌 🤏 ✌️ 🤞 🫰 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👋 🤚 🖐️ ✋ 🖖 🫶 🙏 👏 🙌 🤝 💪 🫵 ✊ 👊 🤛 🤜',
+  Hearts: '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 🔥 ✨ ⭐ 🌟 💫 💯 ✅ ❌ ❓ ❗ 👀 🎉 🎊 🥂 🏆 🚀',
+  Animals: '🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🐔 🐧 🐦 🦄 🐝 🦋 🐢 🐙 🦀 🐬 🐳 🐺 🦉',
+  Food: '🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🫐 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🥑 🌽 🌶️ 🍔 🍟 🍕 🌭 🥪 🌮 🍜 🍣 🍩 🍪 🎂 🍰 🍫 🍿 ☕ 🍺 🍻 🥤',
+  Objects: '💻 🖥️ 📱 ⌨️ 🖱️ 💾 📷 🎧 🎮 📺 ☎️ 📞 ⏰ 💡 🔑 🔒 📌 📎 ✂️ 📝 📚 💰 💵 💳 🎁 📦 ✉️ 📅 ⌛ ⚙️ 🔧 🔨 🧲',
+  Symbols: '✔️ ❎ ➕ ➖ ➗ ❤️‍🔥 💢 💥 💦 💨 🕐 🔝 🆗 🆕 🆒 🔥 ⚡ 🌈 ☀️ ⛅ ☁️ 🌧️ ❄️ 🎵 🎶 ♻️ ⚠️ 🚫 ✅ ❌ ❓ ❗ ‼️ 💤',
+}
 
 function timeOf(iso: string | null): string {
   if (!iso) return ''
@@ -63,6 +77,14 @@ export default function ChatPage() {
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null)
   const [mhi, setMhi] = useState(0)   // highlighted candidate index
 
+  // Emoji + GIF pickers
+  const [emojiOpen, setEmojiOpen] = useState(false)
+  const [gifEnabled, setGifEnabled] = useState(false)
+  const [gifOpen, setGifOpen] = useState(false)
+  const [gifQuery, setGifQuery] = useState('')
+  const [gifResults, setGifResults] = useState<Gif[]>([])
+  const [gifLoading, setGifLoading] = useState(false)
+
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const closedRef = useRef(false)
@@ -77,6 +99,7 @@ export default function ChatPage() {
   useEffect(() => {
     api.get<HistoryResp>('/api/chat/messages').then((d) => {
       setMeId(d.me.id); setMeName(d.me.name); setMessages(d.messages)
+      setGifEnabled(!!d.gif_enabled)
       requestAnimationFrame(scrollToBottom)
     }).catch(() => {})
     api.get<{ members: Member[] }>('/api/chat/members')
@@ -142,14 +165,38 @@ export default function ChatPage() {
     })
   }
 
-  const send = () => {
-    const body = text.trim()
+  const sendBody = (raw: string) => {
+    const body = raw.trim()
     if (!body) return
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     ws.send(JSON.stringify({ body, reply_to_id: replyTo?.id ?? null }))
-    setText(''); setReplyTo(null); setMention(null)
+    setReplyTo(null)
   }
+  const send = () => { sendBody(text); setText(''); setMention(null) }
+
+  const insertAtCursor = (s: string) => {
+    const ta = taRef.current
+    const pos = ta?.selectionStart ?? text.length
+    const next = text.slice(0, pos) + s + text.slice(pos)
+    setText(next)
+    requestAnimationFrame(() => {
+      if (ta) { ta.focus(); ta.setSelectionRange(pos + s.length, pos + s.length) }
+    })
+  }
+
+  // GIF search (debounced) — only when the picker is open.
+  useEffect(() => {
+    if (!gifOpen) return
+    setGifLoading(true)
+    const t = setTimeout(() => {
+      api.get<{ gifs: Gif[] }>(`/api/chat/gif?q=${encodeURIComponent(gifQuery)}`)
+        .then((d) => setGifResults(d.gifs))
+        .catch(() => setGifResults([]))
+        .finally(() => setGifLoading(false))
+    }, 350)
+    return () => clearTimeout(t)
+  }, [gifOpen, gifQuery])
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (mention && candidates.length) {
@@ -252,7 +299,14 @@ export default function ChatPage() {
                         <span className="opacity-80"> · {m.reply_to.body.slice(0, 80)}</span>
                       </div>
                     )}
-                    <span>{renderBody(m.body)}</span>
+                    {IMG_URL_RE.test(m.body.trim()) ? (
+                      <a href={m.body.trim()} target="_blank" rel="noreferrer" className="block">
+                        <img src={m.body.trim()} alt="gif" loading="lazy"
+                             className="rounded-lg max-w-[240px] max-h-[260px] block" />
+                      </a>
+                    ) : (
+                      <span>{renderBody(m.body)}</span>
+                    )}
                     <span className="ml-2 align-bottom text-[10px] text-gray-400">
                       {timeOf(m.created_at)}
                     </span>
@@ -294,6 +348,52 @@ export default function ChatPage() {
           </div>
         )}
 
+        {/* Emoji picker */}
+        {emojiOpen && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setEmojiOpen(false)} />
+            <div className="absolute bottom-full mb-2 left-0 w-72 max-h-72 overflow-y-auto bg-white border border-slate-200 rounded-lg shadow-lg z-20 p-2">
+              {Object.entries(EMOJI_GROUPS).map(([cat, str]) => (
+                <div key={cat} className="mb-2">
+                  <div className="text-[10px] uppercase tracking-wide text-gray-400 px-1 mb-1">{cat}</div>
+                  <div className="grid grid-cols-8 gap-0.5">
+                    {str.split(' ').filter(Boolean).map((e, i) => (
+                      <button key={cat + i} type="button" onClick={() => insertAtCursor(e)}
+                              className="text-xl leading-none p-1 rounded hover:bg-slate-100">{e}</button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* GIF picker */}
+        {gifOpen && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setGifOpen(false)} />
+            <div className="absolute bottom-full mb-2 left-0 w-80 bg-white border border-slate-200 rounded-lg shadow-lg z-20 p-2">
+              <input autoFocus value={gifQuery} onChange={(e) => setGifQuery(e.target.value)}
+                     placeholder="Search GIFs…" className="input text-sm w-full mb-2" />
+              <div className="h-64 overflow-y-auto">
+                {gifLoading && <p className="text-xs text-gray-400 text-center py-4">Searching…</p>}
+                <div className="columns-2 gap-1">
+                  {gifResults.map((g) => (
+                    <button key={g.id} type="button" onClick={() => { sendBody(g.url); setGifOpen(false) }}
+                            className="mb-1 w-full block hover:opacity-80 transition">
+                      <img src={g.preview} alt="gif" loading="lazy" className="rounded w-full" />
+                    </button>
+                  ))}
+                </div>
+                {!gifLoading && gifResults.length === 0 && (
+                  <p className="text-xs text-gray-400 text-center py-4">No GIFs found.</p>
+                )}
+              </div>
+              <p className="text-[10px] text-gray-300 text-right mt-1">Powered by GIPHY</p>
+            </div>
+          </>
+        )}
+
         {replyTo && (
           <div className="flex items-center gap-2 bg-slate-100 border border-slate-200 rounded-t-lg px-3 py-1.5 text-xs">
             <Reply className="w-3.5 h-3.5 text-brand-500 shrink-0" />
@@ -307,6 +407,20 @@ export default function ChatPage() {
         )}
 
         <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); send() }}>
+          <div className="flex items-center gap-1 pb-0.5">
+            <button type="button" title="Emoji"
+                    onClick={() => { setEmojiOpen((o) => !o); setGifOpen(false) }}
+                    className="h-9 w-9 grid place-items-center text-gray-400 hover:text-brand-600 hover:bg-slate-100 rounded-lg">
+              <Smile className="w-5 h-5" />
+            </button>
+            {gifEnabled && (
+              <button type="button" title="GIF"
+                      onClick={() => { setGifOpen((o) => !o); setEmojiOpen(false); setGifQuery('') }}
+                      className="h-9 px-2 grid place-items-center text-xs font-bold text-gray-400 hover:text-brand-600 hover:bg-slate-100 border border-slate-200 rounded-lg">
+                GIF
+              </button>
+            )}
+          </div>
           <textarea
             ref={taRef}
             rows={1}

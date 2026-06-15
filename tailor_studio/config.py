@@ -34,6 +34,10 @@ SESSION_TTL_SECONDS = 14 * 24 * 3600  # 14 days
 # signup is auto-approved. Everyone else signs up "pending" and the admin
 # approves them.
 ADMIN_EMAIL = os.getenv("STUDIO_ADMIN_EMAIL", "").strip().lower()
+# Optional: free Giphy API key (https://developers.giphy.com) to enable GIF
+# search in the team chat. Without it, GIF search is hidden but pasted GIF/image
+# links still render inline.
+GIPHY_API_KEY = os.getenv("STUDIO_GIPHY_KEY", "").strip()
 # Default cookie Secure=false so http://127.0.0.1:8001 works during dev.
 # When you expose only via the cloudflared tunnel, set STUDIO_COOKIE_SECURE=true
 # so the session cookie is HTTPS-only.

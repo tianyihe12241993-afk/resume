@@ -1415,6 +1415,7 @@ def api_chat_history(
 
     return {
         "me": {"id": me.id, "name": me.email.split("@")[0]},
+        "gif_enabled": bool(config.GIPHY_API_KEY),
         "messages": [
             {
                 "id": m.id, "user_id": m.user_id, "name": m.sender_name or "member",
@@ -1424,6 +1425,32 @@ def api_chat_history(
             for m in rows
         ],
     }
+
+
+@router.get("/chat/gif")
+def api_chat_gif(q: str = Query("", max_length=120), me=Depends(auth.require_user)):
+    """Proxy Giphy search/trending so the API key stays server-side."""
+    if not config.GIPHY_API_KEY:
+        raise HTTPException(503, "GIF search is not configured.")
+    import requests
+    q = q.strip()
+    base = "https://api.giphy.com/v1/gifs/" + ("search" if q else "trending")
+    params = {"api_key": config.GIPHY_API_KEY, "limit": 24, "rating": "pg-13"}
+    if q:
+        params["q"] = q
+    try:
+        r = requests.get(base, params=params, timeout=10)
+        data = r.json().get("data", [])
+    except Exception as e:
+        raise HTTPException(502, f"GIF provider error: {e}")
+    out = []
+    for g in data:
+        imgs = g.get("images", {})
+        preview = (imgs.get("fixed_width_small") or imgs.get("fixed_height_small") or {}).get("url")
+        full = (imgs.get("downsized_medium") or imgs.get("downsized") or imgs.get("original") or {}).get("url")
+        if preview and full:
+            out.append({"id": g.get("id"), "preview": preview, "url": full})
+    return {"gifs": out}
 
 
 @router.get("/chat/members")
