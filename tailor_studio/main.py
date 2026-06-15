@@ -94,17 +94,16 @@ def _slug(text: str) -> str:
 
 
 def _filename_bits(j) -> list[str]:
-    """Return the candidate / company / title slug bits, used for both .docx
-    and .pdf download names."""
-    bits = []
+    """Return the stable download stem '<profile>-resume' (no company/role) so
+    re-downloads overwrite instead of accumulating copies. Returned as a list so
+    the .docx / .pdf routes can join it and append the extension."""
+    name = ""
     try:
         if j.batch and j.batch.profile and j.batch.profile.name:
-            bits.append(_slug(j.batch.profile.name))
+            name = _slug(j.batch.profile.name)
     except Exception:
         pass
-    if j.company: bits.append(_slug(j.company))
-    if j.title:   bits.append(_slug(j.title))
-    return bits
+    return [f"{name}-resume" if name else "candidate-resume"]
 
 
 def _job_for_user(jid: int, user) -> JobUrl:

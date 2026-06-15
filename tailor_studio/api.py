@@ -806,13 +806,10 @@ def api_extension_resume_for(
     j, b, p = row
     tailored = None
     if j.status == STATUS_DONE and j.docx_filename:
-        # Build the same friendly filename the /download route returns so
-        # the user sees consistent names in ~/Downloads.
-        bits = []
-        if p.name:    bits.append(_slugify(p.name))
-        if j.company: bits.append(_slugify(j.company))
-        if j.title:   bits.append(_slugify(j.title))
-        fname = ("__".join(bits) or f"job{j.id}") + ".docx"
+        # Stable per-profile name (no company/role) so the auto-download
+        # overwrites the previous file instead of piling up copies. Matches
+        # the /download route's name.
+        fname = f"{_slugify(p.name) if p.name else 'candidate'}-resume.docx"
         # Lazy-compute and persist the docx hash so the extension can
         # verify the uploaded file later. Cheap: ~10ms for a 50KB docx.
         had_hash = bool(j.resume_sha256)

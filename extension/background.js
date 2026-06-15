@@ -107,7 +107,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         try {
           const downloadId = await chrome.downloads.download({
             url: server + msg.path, filename: msg.filename,
-            conflictAction: 'uniquify', saveAs: false,
+            conflictAction: 'overwrite', saveAs: false,
           });
           sendResponse({ ok: true, downloadId, filename: msg.filename });
         } catch (e) {
