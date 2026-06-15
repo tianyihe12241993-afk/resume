@@ -163,13 +163,17 @@ export default function ChatPage() {
     })
   }
 
-  // Render body with @mentions highlighted.
-  const renderBody = (body: string) => {
+  // Render body with @mentions highlighted as a chip that stays readable on
+  // both bubble colors (mine = indigo bg → light chip; others = white bg → indigo chip).
+  const renderBody = (body: string, mine: boolean) => {
+    const chip = mine
+      ? 'bg-white/25 text-white font-semibold rounded px-1'
+      : 'bg-brand-50 text-brand-700 font-semibold rounded px-1'
     const parts: React.ReactNode[] = []
     let last = 0
     body.replace(MENTION_RE, (match, _g, idx: number) => {
       if (idx > last) parts.push(body.slice(last, idx))
-      parts.push(<span key={idx} className="font-semibold text-brand-600">{match}</span>)
+      parts.push(<span key={idx} className={chip}>{match}</span>)
       last = idx + match.length
       return match
     })
@@ -234,7 +238,7 @@ export default function ChatPage() {
                         <span className="opacity-80"> · {m.reply_to.body.slice(0, 80)}</span>
                       </div>
                     )}
-                    <span>{renderBody(m.body)}</span>
+                    <span>{renderBody(m.body, mine)}</span>
                     <span className={clsx('ml-2 align-bottom text-[10px]', mine ? 'text-indigo-200' : 'text-gray-400')}>
                       {timeOf(m.created_at)}
                     </span>
