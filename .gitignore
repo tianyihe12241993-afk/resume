@@ -71,3 +71,6 @@ Thumbs.db
 # runtime server logs
 *.log
 .studio.log
+
+# build artifacts
+*.zip
