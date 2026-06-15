@@ -39,8 +39,11 @@ class User(Base):
     # JSON blob with the user's standard form-fill answers (personal info,
     # eligibility yes/no, etc.). Used by the extension's "Fill form" button.
     answer_library_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # Platform super-admin: can see all users via /api/superadmin/* endpoints.
+    # Platform super-admin: approves members, sees all users.
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Bidders sign up then wait for the admin to approve before they can use the
+    # platform. Admin (and pre-existing accounts) are approved.
+    approved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     profiles = relationship("Profile", back_populates="owner", cascade="all, delete-orphan")
@@ -209,6 +212,11 @@ class ChatMessage(Base):
     )
     sender_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    # Quoted / replied-to message (nullable; SET NULL so deleting the original
+    # doesn't remove the reply).
+    reply_to_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
 
 
@@ -259,6 +267,14 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE user ADD COLUMN answer_library_json TEXT"))
         if "is_admin" not in user_cols:
             conn.execute(text("ALTER TABLE user ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"))
+        if "approved" not in user_cols:
+            conn.execute(text("ALTER TABLE user ADD COLUMN approved BOOLEAN NOT NULL DEFAULT 0"))
+            # Pre-existing accounts predate the approval gate — keep them in.
+            conn.execute(text("UPDATE user SET approved = 1"))
+        # chat_message.reply_to_id (added after the table shipped)
+        cm_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(chat_message)"))}
+        if cm_cols and "reply_to_id" not in cm_cols:
+            conn.execute(text("ALTER TABLE chat_message ADD COLUMN reply_to_id INTEGER"))
         if "answer_library_json" not in prof_cols:
             conn.execute(text("ALTER TABLE profile ADD COLUMN answer_library_json TEXT"))
             # Backfill: if a user already saved answers at user-level, seed

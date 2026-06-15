@@ -44,7 +44,7 @@ async def chat_ws(websocket: WebSocket):
     db = get_session()
     try:
         user = db.get(User, uid)
-        if user is None:
+        if user is None or not user.approved:
             await websocket.close(code=1008)
             return
         name = chat.display_name(user.email)
@@ -56,13 +56,17 @@ async def chat_ws(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_json()
-            body = (data.get("body") or "").strip() if isinstance(data, dict) else ""
+            if not isinstance(data, dict):
+                continue
+            body = (data.get("body") or "").strip()
             if not body:
                 continue
+            reply_to_id = data.get("reply_to_id")
+            reply_to_id = int(reply_to_id) if isinstance(reply_to_id, int) else None
             db = get_session()
             try:
-                m = chat.save_message(db, uid, name, body[:4000])
-                payload = chat.message_payload(m)
+                m = chat.save_message(db, uid, name, body[:4000], reply_to_id=reply_to_id)
+                payload = chat.message_payload(m, chat.reply_snippet(db, m.reply_to_id))
             finally:
                 db.close()
             await chat.manager.broadcast(payload)
@@ -78,6 +82,12 @@ async def chat_ws(websocket: WebSocket):
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+    # Promote the configured admin account (STUDIO_ADMIN_EMAIL) to admin+approved.
+    db = get_session()
+    try:
+        auth.ensure_admin(db)
+    finally:
+        db.close()
     _start_auto_prune()
     # Re-enqueue jobs left in pending / in-flight states by a previous
     # process. Without this, server restarts strand the entire in-memory

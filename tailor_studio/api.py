@@ -79,9 +79,11 @@ def api_signup(body: SignupIn, response: Response, db: Session = Depends(get_db)
         raise HTTPException(400, err)
     if auth.get_user_by_email(db, body.email) is not None:
         raise HTTPException(409, "An account with that email already exists.")
-    user = auth.create_user(db, body.email, body.password)
+    is_admin = auth.normalize_email(body.email) == config.ADMIN_EMAIL
+    user = auth.create_user(db, body.email, body.password,
+                            approved=is_admin, is_admin=is_admin)
     auth.issue_session(response, user.id)
-    return {"ok": True, "email": user.email, "id": user.id}
+    return {"ok": True, "email": user.email, "id": user.id, "approved": user.approved}
 
 
 @public_router.post("/login")
@@ -110,6 +112,7 @@ def api_me(request: Request):
         "name": user.email.split("@")[0],
         "role": "user",
         "is_admin": bool(getattr(user, "is_admin", False)),
+        "approved": bool(getattr(user, "approved", False)),
         "password_set": True,
         "created_at": _iso(user.created_at),
     }
@@ -1400,16 +1403,79 @@ def api_chat_history(
         .all()
     )
     rows.reverse()
+    loaded = {m.id: m for m in rows}
+
+    def _reply(rid):
+        if not rid:
+            return None
+        r = loaded.get(rid) or db.get(ChatMessage, rid)
+        if r is None:
+            return None
+        return {"id": r.id, "name": r.sender_name or "member", "body": (r.body or "")[:160]}
+
     return {
         "me": {"id": me.id, "name": me.email.split("@")[0]},
         "messages": [
             {
                 "id": m.id, "user_id": m.user_id, "name": m.sender_name or "member",
-                "body": m.body, "created_at": _iso(m.created_at),
+                "body": m.body, "reply_to": _reply(m.reply_to_id),
+                "created_at": _iso(m.created_at),
             }
             for m in rows
         ],
     }
+
+
+@router.get("/chat/members")
+def api_chat_members(db: Session = Depends(get_db), me=Depends(auth.require_user)):
+    """Approved members, for the @mention autocomplete. Includes a synthetic
+    'all' entry for mentioning everyone."""
+    users = db.query(User).filter(User.approved == True).order_by(User.email).all()  # noqa: E712
+    return {"members": [{"id": u.id, "name": u.email.split("@")[0]} for u in users]}
+
+
+# ───────────────── members (admin approval) ─────────────────
+
+def _member_out(u: User) -> dict:
+    return {
+        "id": u.id, "email": u.email, "name": u.email.split("@")[0],
+        "approved": bool(u.approved), "is_admin": bool(u.is_admin),
+        "created_at": _iso(u.created_at),
+    }
+
+
+@router.get("/admin/members")
+def api_members(db: Session = Depends(get_db), me=Depends(auth.require_admin)):
+    users = db.query(User).order_by(User.approved.asc(), User.created_at.desc()).all()
+    return {
+        "members": [_member_out(u) for u in users],
+        "pending": sum(1 for u in users if not u.approved),
+    }
+
+
+@router.post("/admin/members/{uid}/approve")
+def api_member_approve(uid: int, db: Session = Depends(get_db), me=Depends(auth.require_admin)):
+    u = db.get(User, uid)
+    if u is None:
+        raise HTTPException(404, "No such member.")
+    u.approved = True
+    db.commit()
+    return {"member": _member_out(u)}
+
+
+@router.post("/admin/members/{uid}/reject")
+def api_member_reject(uid: int, db: Session = Depends(get_db), me=Depends(auth.require_admin)):
+    """Reject (delete) a member account. Can't remove yourself or another admin."""
+    u = db.get(User, uid)
+    if u is None:
+        raise HTTPException(404, "No such member.")
+    if u.id == me.id:
+        raise HTTPException(400, "You can't remove your own account.")
+    if u.is_admin:
+        raise HTTPException(400, "Can't remove an admin account.")
+    db.delete(u)
+    db.commit()
+    return {"ok": True}
 
 
 # ───────────────── job actions ─────────────────

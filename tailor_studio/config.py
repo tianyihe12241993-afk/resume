@@ -30,6 +30,10 @@ AUTH_PASSWORD_HASH = os.getenv("STUDIO_AUTH_PASSWORD_HASH", "").strip()
 SESSION_SECRET = os.getenv("STUDIO_SESSION_SECRET", "").strip()
 SESSION_COOKIE = "studio_session"
 SESSION_TTL_SECONDS = 14 * 24 * 3600  # 14 days
+# The platform admin: auto-promoted to is_admin + approved on startup, and their
+# signup is auto-approved. Everyone else signs up "pending" and the admin
+# approves them.
+ADMIN_EMAIL = os.getenv("STUDIO_ADMIN_EMAIL", "").strip().lower()
 # Default cookie Secure=false so http://127.0.0.1:8001 works during dev.
 # When you expose only via the cloudflared tunnel, set STUDIO_COOKIE_SECURE=true
 # so the session cookie is HTTPS-only.

@@ -32,19 +32,35 @@ def display_name(email: str, name: Optional[str] = None) -> str:
     return (email or "").split("@")[0] or "member"
 
 
-def message_payload(m: ChatMessage) -> dict:
+def reply_snippet(db, reply_to_id: Optional[int]) -> Optional[dict]:
+    """Compact view of a quoted message, for rendering the quote block."""
+    if not reply_to_id:
+        return None
+    r = db.get(ChatMessage, reply_to_id)
+    if r is None:
+        return None
+    return {"id": r.id, "name": r.sender_name or "member", "body": (r.body or "")[:160]}
+
+
+def message_payload(m: ChatMessage, reply: Optional[dict] = None) -> dict:
     return {
         "type": "message",
         "id": m.id,
         "user_id": m.user_id,
         "name": m.sender_name or "member",
         "body": m.body,
+        "reply_to": reply,
         "created_at": _iso(m.created_at),
     }
 
 
-def save_message(db, user_id: int, sender_name: str, body: str) -> ChatMessage:
-    m = ChatMessage(user_id=user_id, sender_name=sender_name, body=body)
+def save_message(db, user_id: int, sender_name: str, body: str,
+                 reply_to_id: Optional[int] = None) -> ChatMessage:
+    # Drop a dangling reply reference rather than failing the FK.
+    if reply_to_id and db.get(ChatMessage, reply_to_id) is None:
+        reply_to_id = None
+    m = ChatMessage(user_id=user_id, sender_name=sender_name, body=body,
+                    reply_to_id=reply_to_id)
     db.add(m)
     db.commit()
     db.refresh(m)

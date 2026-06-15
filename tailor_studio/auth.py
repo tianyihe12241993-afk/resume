@@ -128,12 +128,29 @@ def get_user_by_email(db: Session, email: str) -> Optional[User]:
     return db.query(User).filter(User.email == e).first()
 
 
-def create_user(db: Session, email: str, password: str) -> User:
-    user = User(email=normalize_email(email), password_hash=hash_password(password))
+def create_user(db: Session, email: str, password: str, approved: bool = False,
+                is_admin: bool = False) -> User:
+    user = User(
+        email=normalize_email(email), password_hash=hash_password(password),
+        approved=approved, is_admin=is_admin,
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
     return user
+
+
+def ensure_admin(db: Session) -> None:
+    """Promote the configured STUDIO_ADMIN_EMAIL account to is_admin + approved.
+    Runs on startup so the admin is always able to log in and approve others."""
+    email = (config.ADMIN_EMAIL or "").strip().lower()
+    if not email:
+        return
+    u = get_user_by_email(db, email)
+    if u and not (u.is_admin and u.approved):
+        u.is_admin = True
+        u.approved = True
+        db.commit()
 
 
 # ── FastAPI dependencies ───────────────────────────────────────────────────
@@ -153,6 +170,8 @@ def require_user(request: Request) -> User:
     user = current_user(request)
     if user is None:
         raise HTTPException(status_code=401, detail="Not authenticated.")
+    if not user.approved:
+        raise HTTPException(status_code=403, detail="Your account is pending admin approval.")
     return user
 
 

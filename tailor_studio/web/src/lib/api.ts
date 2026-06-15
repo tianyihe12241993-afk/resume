@@ -50,6 +50,8 @@ export interface User {
   email: string
   name: string | null
   role: 'admin' | 'bidder'
+  is_admin?: boolean
+  approved?: boolean
   password_set: boolean
   created_at: string
 }

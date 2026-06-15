@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, FolderKanban, Calendar as CalendarIcon, Search, LogOut,
-  MessageSquare, ClipboardList, MessagesSquare,
+  MessageSquare, ClipboardList, MessagesSquare, UserCheck,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useQuery } from '@tanstack/react-query'
@@ -33,6 +33,15 @@ export default function Layout() {
     refetchInterval: 15_000,
   })
   const unreadCount = unread?.count ?? 0
+
+  // Admin-only: pending member-approval requests, for the sidebar badge.
+  const { data: members } = useQuery({
+    enabled: !!user?.is_admin,
+    queryKey: ['admin/members'],
+    queryFn: () => api.get<{ pending: number }>('/api/admin/members'),
+    refetchInterval: 15_000,
+  })
+  const pendingMembers = members?.pending ?? 0
   const onSearch = (e: React.FormEvent) => {
     e.preventDefault()
     if (q.trim()) {
@@ -69,6 +78,9 @@ export default function Layout() {
           <SideLink to="/chat" icon={MessagesSquare}>Team chat</SideLink>
           <SideLink to="/calendar" icon={CalendarIcon}>Calendar</SideLink>
           <SideLink to="/answers" icon={ClipboardList}>Answers</SideLink>
+          {user?.is_admin && (
+            <SideLink to="/members" icon={UserCheck} badge={pendingMembers}>Members</SideLink>
+          )}
         </nav>
 
         {unreadCount > 0 && unread?.samples && (

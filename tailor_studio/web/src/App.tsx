@@ -10,7 +10,26 @@ import Calendar from '@/pages/admin/Calendar'
 import Search from '@/pages/admin/Search'
 import Answers from '@/pages/admin/Answers'
 import Chat from '@/pages/admin/Chat'
-import { useAuth } from '@/hooks/useAuth'
+import Members from '@/pages/admin/Members'
+import { useAuth, useLogout } from '@/hooks/useAuth'
+
+function PendingApproval({ email }: { email: string }) {
+  const logout = useLogout()
+  return (
+    <div className="min-h-screen grid place-items-center bg-slate-50 p-6">
+      <div className="card p-8 max-w-md text-center">
+        <div className="text-3xl mb-3">⏳</div>
+        <h1 className="text-lg font-bold text-gray-900 mb-1">Waiting for approval</h1>
+        <p className="text-sm text-gray-500">
+          Your request to join (<span className="font-medium">{email}</span>) was sent to the
+          admin. You'll get access as soon as they approve you.
+        </p>
+        <button onClick={() => logout.mutate()}
+                className="btn-secondary text-sm mt-5">Sign out</button>
+      </div>
+    </div>
+  )
+}
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { data: user, isLoading } = useAuth()
@@ -21,6 +40,9 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   if (!user) {
     const next = encodeURIComponent(loc.pathname + loc.search)
     return <Navigate to={`/login?next=${next}`} replace />
+  }
+  if (user.approved === false) {
+    return <PendingApproval email={user.email} />
   }
   return <>{children}</>
 }
@@ -40,6 +62,7 @@ export default function App() {
         <Route path="/search" element={<Search />} />
         <Route path="/answers" element={<Answers />} />
         <Route path="/chat" element={<Chat />} />
+        <Route path="/members" element={<Members />} />
         {/* Legacy admin paths still target /admin/* — register the same components there. */}
         <Route path="/admin" element={<Navigate to="/dashboard" replace />} />
         <Route path="/admin/profiles" element={<Profiles />} />
