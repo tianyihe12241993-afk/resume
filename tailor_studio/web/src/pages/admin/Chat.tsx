@@ -170,17 +170,15 @@ export default function ChatPage() {
     })
   }
 
-  // Render body with @mentions highlighted as a chip that stays readable on
-  // both bubble colors (mine = indigo bg → light chip; others = white bg → indigo chip).
-  const renderBody = (body: string, mine: boolean) => {
-    const chip = mine
-      ? 'bg-white/25 text-white font-semibold rounded px-1'
-      : 'bg-brand-50 text-brand-700 font-semibold rounded px-1'
+  // Render body with @mentions highlighted as a small readable chip.
+  const renderBody = (body: string) => {
     const parts: React.ReactNode[] = []
     let last = 0
     body.replace(MENTION_RE, (match, _g, idx: number) => {
       if (idx > last) parts.push(body.slice(last, idx))
-      parts.push(<span key={idx} className={chip}>{match}</span>)
+      parts.push(
+        <span key={idx} className="bg-brand-100 text-brand-700 font-semibold rounded px-1">{match}</span>,
+      )
       last = idx + match.length
       return match
     })
@@ -243,22 +241,19 @@ export default function ChatPage() {
                     </div>
                   )}
                   <div className={clsx(
-                    'rounded-2xl px-3 py-1.5 text-sm whitespace-pre-wrap break-words shadow-sm',
-                    mine ? 'bg-brand-600 text-white rounded-br-sm'
-                         : pinged ? 'bg-amber-50 border border-amber-300 text-gray-800 rounded-bl-sm'
-                                  : 'bg-white border border-slate-200 text-gray-800 rounded-bl-sm',
+                    'rounded-2xl px-3 py-1.5 text-sm whitespace-pre-wrap break-words shadow-sm text-gray-800 border',
+                    mine ? 'bg-brand-50 border-brand-200 rounded-br-sm'
+                         : pinged ? 'bg-amber-50 border-amber-300 rounded-bl-sm'
+                                  : 'bg-white border-slate-200 rounded-bl-sm',
                   )}>
                     {m.reply_to && (
-                      <div className={clsx(
-                        'mb-1 pl-2 border-l-2 text-xs rounded-sm py-0.5',
-                        mine ? 'border-indigo-300 text-indigo-100' : 'border-brand-300 text-gray-500',
-                      )}>
+                      <div className="mb-1 pl-2 border-l-2 text-xs rounded-sm py-0.5 border-brand-300 text-gray-500">
                         <span className="font-semibold">{m.reply_to.name}</span>
                         <span className="opacity-80"> · {m.reply_to.body.slice(0, 80)}</span>
                       </div>
                     )}
-                    <span>{renderBody(m.body, mine)}</span>
-                    <span className={clsx('ml-2 align-bottom text-[10px]', mine ? 'text-indigo-200' : 'text-gray-400')}>
+                    <span>{renderBody(m.body)}</span>
+                    <span className="ml-2 align-bottom text-[10px] text-gray-400">
                       {timeOf(m.created_at)}
                     </span>
                   </div>
