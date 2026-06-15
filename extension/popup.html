@@ -7,12 +7,16 @@
     :root { color-scheme: light; }
     html, body { margin: 0; padding: 0; font: 13px/1.4 -apple-system, system-ui, sans-serif; color: #1f2937; }
     body { width: 460px; padding: 12px 14px 14px; background: #fff; }
-    h1 { font-size: 14px; margin: 0 0 10px; color: #111827; display: flex; align-items: center; gap: 8px; }
-    h1 .count { font-weight: 500; color: #6b7280; font-size: 12px; }
+    h1 { font-size: 14px; margin: 0 0 10px; color: #111827; font-weight: 700; }
+    h2 { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #4f46e5; margin: 14px 0 6px; }
+    h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: #6b7280; margin: 0 0 6px; }
+    label.field { display: block; font-size: 11px; font-weight: 600; color: #6b7280; }
+    select, input[type=text] { width: 100%; padding: 6px 8px; font-size: 13px; border: 1px solid #e5e7eb; border-radius: 5px; margin-top: 4px; }
+    .help { font-size: 11px; color: #9ca3af; margin: 4px 0 0; line-height: 1.35; }
+    hr { border: 0; border-top: 1px solid #f0f0f3; margin: 14px 0 0; }
     .row { display: flex; gap: 12px; }
     .col { flex: 1; min-width: 0; }
-    .col h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: #6b7280; margin: 0 0 6px; }
-    ul { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 6px; background: #fafafa; }
+    ul { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 6px; background: #fafafa; }
     li { padding: 5px 8px; border-bottom: 1px solid #f3f4f6; font-size: 12px; }
     li:last-child { border-bottom: 0; }
     li label { display: flex; gap: 6px; align-items: flex-start; cursor: pointer; }
@@ -20,43 +24,49 @@
     li .title { color: #111827; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
     li .host { color: #9ca3af; font-size: 10px; margin-top: 1px; }
     .actions { margin-top: 12px; display: flex; gap: 8px; align-items: center; }
-    button { background: #4f46e5; color: #fff; border: 0; padding: 8px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13px; }
-    button:disabled { background: #c7d2fe; cursor: default; }
-    button.secondary { background: #fff; color: #4f46e5; border: 1px solid #c7d2fe; }
-    .opt { font-size: 12px; color: #4b5563; display: flex; align-items: center; gap: 5px; }
-    #status { font-size: 12px; color: #6b7280; min-height: 16px; margin-top: 6px; }
-    .err { color: #b91c1c; }
-    .ok { color: #15803d; }
-    .empty { padding: 18px; color: #9ca3af; font-size: 12px; text-align: center; }
+    button.primary { background: #4f46e5; color: #fff; border: 0; padding: 8px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13px; }
+    button.primary:disabled { background: #c7d2fe; cursor: default; }
+    button.link { background: none; border: 0; color: #4f46e5; font-size: 11px; padding: 6px 0 0; cursor: pointer; }
+    .opt { font-size: 12px; color: #4b5563; display: flex; align-items: center; gap: 5px; margin-top: 10px; }
+    #status { font-size: 12px; color: #6b7280; min-height: 16px; }
+    .err { color: #b91c1c; } .ok { color: #15803d; }
+    .empty { padding: 16px; color: #9ca3af; font-size: 12px; text-align: center; }
     .results { margin-top: 10px; padding: 8px 10px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; font-size: 12px; line-height: 1.45; color: #166534; }
     .results.err { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
   </style>
 </head>
 <body>
-  <h1>Tailor Studio <span class="count" id="count"></span></h1>
+  <h1>Tailor Studio</h1>
 
+  <!-- ── Apply side ─────────────────────────────────────────── -->
+  <h2>Apply</h2>
+  <label class="field">Main profile (drives the on-page resume widget + Draft)
+    <select id="main-profile"><option value="">— pick one —</option></select>
+  </label>
+  <p class="help">On a job page this profile's tailored resume auto-downloads, and the bottom-left ✨ Draft button answers required essay questions.</p>
+
+  <hr>
+
+  <!-- ── Source side ────────────────────────────────────────── -->
+  <h2>Source open tabs</h2>
   <div class="row">
     <div class="col">
-      <h2>URLs (<span id="urls-count">0</span>)</h2>
+      <h3>Job tabs (<span id="urls-count">0</span>)</h3>
       <ul id="urls"><li class="empty">Reading tabs…</li></ul>
     </div>
     <div class="col" style="max-width: 170px;">
-      <h2>Profiles</h2>
+      <h3>Send to profiles</h3>
       <ul id="profiles"><li class="empty">Loading…</li></ul>
     </div>
   </div>
-
-  <label class="opt" style="margin-top:10px;">
-    <input type="checkbox" id="close-after" checked> Close queued tabs after success
-  </label>
-
+  <label class="opt"><input type="checkbox" id="close-after" checked> Close queued tabs after success</label>
   <div class="actions">
-    <button id="queue" disabled>Queue</button>
-    <button id="settings" class="secondary" type="button">Server…</button>
+    <button id="queue" class="primary" disabled>Queue</button>
     <span id="status"></span>
   </div>
-
   <div id="results" class="results" style="display:none;"></div>
+
+  <button class="link" id="settings" type="button">Server URL…</button>
 
   <script src="popup.js"></script>
 </body>

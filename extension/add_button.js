@@ -23,7 +23,9 @@
 
   const host = document.createElement('div');
   host.id = 'ts-add-host';
-  host.style.cssText = 'position:fixed;right:16px;bottom:72px;z-index:2147483647;';
+  // Top-right: clears the apply-side UI (Resume widget bottom-right, Draft
+  // button bottom-left) that also appears on job pages in this combined build.
+  host.style.cssText = 'position:fixed;right:16px;top:84px;z-index:2147483646;';
   const root = host.attachShadow({ mode: 'open' });
   root.innerHTML = `
     <style>
