@@ -1402,7 +1402,8 @@ def _search_config_out(c: Optional[SearchConfig]) -> Optional[dict]:
         return None
     return {
         "keywords": c.keywords, "locations": c.locations, "sites": c.sites,
-        "remote": c.remote, "hours_old": c.hours_old, "results_limit": c.results_limit,
+        "remote": c.remote, "exclude_easyapply": c.exclude_easyapply,
+        "hours_old": c.hours_old, "results_limit": c.results_limit,
         "ats_companies": c.ats_companies, "preferences": c.preferences,
         "min_score": c.min_score, "schedule_hour": c.schedule_hour,
         "enabled": c.enabled,
@@ -1436,8 +1437,9 @@ def api_search_config_get(
 class SearchConfigIn(BaseModel):
     keywords: str = ""
     locations: str = ""
-    sites: str = "indeed,linkedin"
+    sites: str = "indeed,linkedin,glassdoor,zip_recruiter,google"
     remote: bool = True
+    exclude_easyapply: bool = True
     hours_old: int = 168
     results_limit: int = 40
     ats_companies: str = ""
@@ -1458,6 +1460,7 @@ def api_search_config_set(
     c.locations = body.locations
     c.sites = body.sites
     c.remote = bool(body.remote)
+    c.exclude_easyapply = bool(body.exclude_easyapply)
     c.hours_old = max(1, int(body.hours_old))
     c.results_limit = max(1, min(200, int(body.results_limit)))
     c.ats_companies = body.ats_companies

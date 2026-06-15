@@ -25,6 +25,16 @@ async function postJson(path, body) {
   return r.json();
 }
 
+async function getJson(path) {
+  const server = await getServer();
+  const r = await fetch(server + path, { credentials: 'include' });
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    return { __error: `HTTP ${r.status}: ${text.slice(0, 200)}` };
+  }
+  return r.json();
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     try {
@@ -37,6 +47,21 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (msg && msg.type === 'rescue_send') {
         const r = await postJson('/api/extension/rescue', { url: msg.url, html: msg.html });
         sendResponse(r);
+        return;
+      }
+      // Floating "Add" button: list profiles for its picker.
+      if (msg && msg.type === 'list_profiles') {
+        const r = await getJson('/api/admin/profiles');
+        if (r.__error) sendResponse({ error: r.__error });
+        else sendResponse({ profiles: (r.profiles || []).map((p) => ({ id: p.id, name: p.name })) });
+        return;
+      }
+      // Floating "Add" button: queue the current page's URL into a profile.
+      if (msg && msg.type === 'queue_url') {
+        const r = await postJson('/api/extension/queue', {
+          urls: [msg.url], profile_ids: [msg.profileId],
+        });
+        sendResponse(r && r.__error ? { error: r.__error } : r);
         return;
       }
       sendResponse({ error: 'unknown message' });

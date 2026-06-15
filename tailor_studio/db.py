@@ -199,8 +199,12 @@ class SearchConfig(Base):
 
     keywords: Mapped[str] = mapped_column(Text, nullable=False, default="")        # newline-separated
     locations: Mapped[str] = mapped_column(Text, nullable=False, default="")       # newline-separated
-    sites: Mapped[str] = mapped_column(Text, nullable=False, default="indeed,linkedin")  # comma list
+    sites: Mapped[str] = mapped_column(
+        Text, nullable=False, default="indeed,linkedin,glassdoor,zip_recruiter,google",
+    )  # comma list of jobspy sites
     remote: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Drop LinkedIn EasyApply / quick-apply listings (apply stays on LinkedIn).
+    exclude_easyapply: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     hours_old: Mapped[int] = mapped_column(Integer, nullable=False, default=168)
     results_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=40)
     # ATS boards: newline list of "provider:slug" (e.g. greenhouse:stripe).
@@ -292,6 +296,12 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE user ADD COLUMN answer_library_json TEXT"))
         if "is_admin" not in user_cols:
             conn.execute(text("ALTER TABLE user ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"))
+        # search_config.exclude_easyapply (added after the table shipped)
+        sc_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(search_config)"))}
+        if sc_cols and "exclude_easyapply" not in sc_cols:
+            conn.execute(text(
+                "ALTER TABLE search_config ADD COLUMN exclude_easyapply BOOLEAN NOT NULL DEFAULT 1"
+            ))
         if "answer_library_json" not in prof_cols:
             conn.execute(text("ALTER TABLE profile ADD COLUMN answer_library_json TEXT"))
             # Backfill: if a user already saved answers at user-level, seed

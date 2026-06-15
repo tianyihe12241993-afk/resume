@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Tailor Studio — Sourcing",
-  "description": "User-side tool: queue all open job tabs into tailor_studio with one click. Auto-rescue stuck JDs by sending the rendered DOM when you open them.",
-  "version": "0.5.0",
+  "description": "User-side tool: a floating Add button on any job page (review the JD, then add to tailoring), plus one-click queue of all open job tabs. Auto-rescues stuck JDs.",
+  "version": "0.6.0",
   "action": {
     "default_title": "Tailor Studio: queue open tabs",
     "default_popup": "popup.html",
@@ -62,6 +62,12 @@
       "js": ["content.js"],
       "run_at": "document_idle",
       "all_frames": true
+    },
+    {
+      "matches": ["*://*/*"],
+      "js": ["add_button.js"],
+      "run_at": "document_idle",
+      "all_frames": false
     }
   ]
 }

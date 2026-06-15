@@ -463,6 +463,12 @@ function DiscoveryCard({ pid, hasResume }: { pid: number; hasResume: boolean }) 
                    className="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500" />
             Remote only
           </label>
+          <label className="flex items-center gap-2 text-sm text-gray-700 col-span-2">
+            <input type="checkbox" checked={cfg.exclude_easyapply}
+                   onChange={(e) => set('exclude_easyapply', e.target.checked)}
+                   className="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500" />
+            Skip LinkedIn EasyApply / quick-apply listings
+          </label>
         </div>
       </div>
 

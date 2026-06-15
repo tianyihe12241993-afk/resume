@@ -74,6 +74,7 @@ export interface SearchConfig {
   locations: string
   sites: string
   remote: boolean
+  exclude_easyapply: boolean
   hours_old: number
   results_limit: number
   ats_companies: string

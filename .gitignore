@@ -67,3 +67,7 @@ venv/
 .vscode/
 Thumbs.db
 !data/base_resumes/.gitkeep
+
+# runtime server logs
+*.log
+.studio.log

@@ -10,7 +10,8 @@ For the person who **collects URLs and queues tailoring jobs**. No applying happ
 
 ## Features
 
-- **Quick Add**: open many job tabs across windows → click extension → tick which open tabs to queue and which profiles to send them to → one click creates per-profile batches and (optionally) closes the source tabs.
+- **Add button (per page)**: a small floating **✦** appears on every page. Open a job, read the JD, click it → pick a profile → **Add this job** sends just that URL into the tailoring system. Manual and one-at-a-time, so no duplicates and no EasyApply spam — you only add what you've actually reviewed. (Requires being logged in to the web app in the same browser.)
+- **Quick Add (bulk)**: open many job tabs across windows → click the toolbar icon → tick which open tabs to queue and which profiles to send them to → one click creates per-profile batches and (optionally) closes the source tabs.
 - **Rescue Mode** (silent): when a JD on an ATS host is stuck in `needs_manual_jd`, opening it in your browser sends the rendered DOM to the server so Haiku can re-extract. The stuck row auto-heals into `pending` and re-runs the pipeline.
 
 ## Companion extension
