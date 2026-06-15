@@ -9,6 +9,7 @@ import shutil
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field
@@ -17,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from . import auth, config, pipeline, storage
 from .db import (
-    Batch, JobUrl, Profile, get_db,
+    Batch, CalendarEvent, JobUrl, Profile, User, get_db,
     APP_STATUSES, STATUS_DONE, STATUS_ERROR, STATUS_NEEDS_JD, STATUS_PENDING,
 )
 
@@ -108,6 +109,7 @@ def api_me(request: Request):
         "email": user.email,
         "name": user.email.split("@")[0],
         "role": "user",
+        "is_admin": bool(getattr(user, "is_admin", False)),
         "password_set": True,
         "created_at": _iso(user.created_at),
     }
@@ -531,15 +533,31 @@ def _queue_urls_for_profile(
         raise HTTPException(400, "No valid URLs provided.")
     seen: set[str] = set()
     cleaned = []
+    skipped_linkedin: list[str] = []
     for u in raw_urls:
         if u in seen:
             continue
-        seen.add(u); cleaned.append(u)
+        seen.add(u)
+        host = urlparse(u).netloc.lower()
+        if host == "linkedin.com" or host.endswith(".linkedin.com"):
+            skipped_linkedin.append(u)
+            continue
+        cleaned.append(u)
     if len(cleaned) > config.MAX_URLS_PER_BATCH:
         raise HTTPException(
             400, f"Too many URLs ({len(cleaned)}). Max {config.MAX_URLS_PER_BATCH}."
         )
-    return _queue_cleaned_urls(db, p, raw_urls, cleaned)
+    if not cleaned:
+        return {
+            "batch_id": None, "added": 0,
+            "skipped_done": 0, "skipped_existing": 0, "skipped_dupe": 0,
+            "skipped_linkedin": len(skipped_linkedin),
+            "duplicates": [],
+            "message": f"All {len(skipped_linkedin)} URLs were LinkedIn — skipped (LinkedIn blocks scrapers). Paste the JD text manually for these.",
+        }
+    result = _queue_cleaned_urls(db, p, raw_urls, cleaned)
+    result["skipped_linkedin"] = len(skipped_linkedin)
+    return result
 
 
 def _queue_cleaned_urls(db: Session, p, raw_urls, cleaned) -> dict:
@@ -1049,7 +1067,7 @@ class DraftAnswersIn(BaseModel):
     questions: list[DraftQuestion]
 
 
-_ANSWER_CACHE_VERSION = "1"
+_ANSWER_CACHE_VERSION = "3"   # bumped: post-process strips em/en-dashes
 
 
 def _answer_cache_path(profile_id: Optional[int], question_text: str, context_hash: str) -> Path:
@@ -1098,17 +1116,25 @@ def _draft_one(client, question: DraftQuestion, context_block: str,
     if question.kind in ("radio", "select") and question.options:
         opts_block = "\n".join(f"- {o}" for o in question.options)
         instruction = (
-            f"Pick the most accurate option for this candidate. Output JUST the option text "
-            f"verbatim — no quotes, no explanation.\n\nOPTIONS:\n{opts_block}"
+            f"Pick the single most-likely option for this candidate. You MUST pick one — "
+            f"never refuse, never say you can't decide. If the candidate context is silent "
+            f"on this, pick the most reasonable default (e.g. 'Prefer not to say' for "
+            f"demographic questions; the most inclusive option for eligibility questions). "
+            f"Output JUST the option text verbatim — no quotes, no explanation."
+            f"\n\nOPTIONS:\n{opts_block}"
         )
     else:
         instruction = (
             "Generate the candidate's answer in their first-person voice. "
-            "1–3 sentences for short questions, max one short paragraph for "
-            "essay questions. Concrete, specific, grounded in their actual "
-            "experience from the corpus. Don't invent metrics, employers, or "
-            "products. No marketing fluff. Output just the answer text — "
-            "no preamble, no quotes."
+            "1-3 sentences for short questions, max one short paragraph for "
+            "essay questions. Be concrete and specific, drawing on the candidate's "
+            "experience profile. You MUST produce an answer - never say 'I can't "
+            "answer', 'insufficient information', or anything similar. If a specific "
+            "fact isn't in the context, give a reasonable, plausible answer grounded "
+            "in the candidate's general experience and motivation. Use plain hyphens "
+            "(-) only - never em-dashes or en-dashes. The ONLY hard rule: don't "
+            "invent specific metrics, employer names, or product names that aren't "
+            "in the context. Output just the answer text - no preamble, no quotes."
         )
 
     prompt = (
@@ -1121,28 +1147,66 @@ def _draft_one(client, question: DraftQuestion, context_block: str,
         max_tokens=600,
         temperature=0.3,
         system=[{"type": "text",
-                 "text": "You are filling out a job application as the candidate. Be honest, "
-                         "specific, and concise. Match the question's register: a Yes/No gets "
-                         "one word, a 'tell us about a time' gets a short STAR-style story "
-                         "grounded in the candidate's real work."}],
+                 "text": "You are filling out a job application as the candidate. Always "
+                         "produce a usable answer — never refuse, never say 'I can't answer' "
+                         "or 'insufficient information'. Be honest, specific, and concise. "
+                         "Match the question's register: a Yes/No gets one word, a 'tell us "
+                         "about a time' gets a short STAR-style story grounded in the "
+                         "candidate's real work. For generic motivation/why-this-role "
+                         "questions, infer reasonable framing from the candidate's "
+                         "experience profile rather than refusing."}],
         messages=[{"role": "user", "content": prompt}],
     )
-    out = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+    def _extract(resp_obj) -> str:
+        return "".join(b.text for b in resp_obj.content if getattr(b, "type", None) == "text").strip()
+
+    out = _extract(resp)
+    # One retry if Haiku refused. Cheap and rare.
+    refusal_phrases = (
+        "i can't answer", "i cannot answer", "i'm unable to",
+        "insufficient information", "not enough information",
+        "i don't have", "without more information",
+    )
+    if any(p in out.lower() for p in refusal_phrases):
+        retry = client.messages.create(
+            model=app_config.EXTRACT_MODEL,
+            max_tokens=600,
+            temperature=0.5,
+            system=[{"type": "text",
+                     "text": "You are the candidate, filling in a job application. You "
+                             "MUST give a usable answer — never refuse. Use the candidate's "
+                             "experience profile as a basis; if a specific fact is missing, "
+                             "give a reasonable plausible answer in their voice."}],
+            messages=[{"role": "user", "content": prompt + "\n\nNote: your previous reply refused. Try again and produce an actual answer."}],
+        )
+        retry_out = _extract(retry)
+        if retry_out and not any(p in retry_out.lower() for p in refusal_phrases):
+            out = retry_out
+
     # Strip surrounding quote marks if Claude added them
     if len(out) >= 2 and out[0] in ('"', '"', '"', "'") and out[-1] in ('"', '"', '"', "'"):
         out = out[1:-1].strip()
+    # Normalize stylized dashes to plain hyphens. Haiku occasionally inserts
+    # em-dashes (— U+2014) or en-dashes (– U+2013); the candidate's voice is
+    # a plain hyphen.
+    out = out.replace("—", "-").replace("–", "-")
     _save_cached_answer(profile_id, question.text, context_hash, out)
     return out
 
 
 def _build_candidate_context_block(
     db: Session, user, url: str, profile_id_hint: Optional[int],
-) -> tuple[str, Optional[int]]:
+) -> tuple[str, Optional[int], str]:
     """Pull together every grounding signal we have for the LLM:
        - JD text (if a JobUrl row exists for the URL + profile)
        - Candidate deep profile (from app.profile_extractor cache)
        - Standard answer library (personal + professional + eligibility)
-    Returns (context_text, matched_profile_id).
+
+    Returns (context_text, matched_profile_id, identity_hash) where
+    identity_hash is a sha of ONLY the candidate-identity parts (deep
+    profile + standard answers). Used as the cache key so the same
+    question on a different application's JD still hits cache — JD text
+    is in the prompt but NOT in the cache key.
     """
     from app.profile_extractor import extract_candidate_profile, profile_summary_text
     from app.similarity import docx_text
@@ -1175,13 +1239,16 @@ def _build_candidate_context_block(
         if profile and profile.user_id != user.id:
             profile = None
 
-    bits: list[str] = []
-    if job_company or job_title:
-        bits.append(f"TARGET ROLE: {job_title} @ {job_company}")
-    if jd_text:
-        bits.append(f"JOB DESCRIPTION:\n{jd_text}")
+    # Identity parts (stable per profile) go into both the prompt AND the
+    # cache-key hash. JD parts go only into the prompt.
+    identity_bits: list[str] = []
+    jd_bits: list[str] = []
 
-    # Deep candidate profile — built once per resume, cached
+    if job_company or job_title:
+        jd_bits.append(f"TARGET ROLE: {job_title} @ {job_company}")
+    if jd_text:
+        jd_bits.append(f"JOB DESCRIPTION:\n{jd_text}")
+
     if profile:
         try:
             base = storage.base_resume_path(profile.id)
@@ -1190,12 +1257,10 @@ def _build_candidate_context_block(
                 deep = extract_candidate_profile(resume_text)
                 summary = profile_summary_text(deep, max_chars=4000)
                 if summary:
-                    bits.append("CANDIDATE EXPERIENCE PROFILE:\n" + summary)
+                    identity_bits.append("CANDIDATE EXPERIENCE PROFILE:\n" + summary)
         except Exception:
             pass
 
-    # Standard answer library
-    if profile:
         try:
             ans = _load_profile_answers(profile)
             lines = []
@@ -1215,11 +1280,22 @@ def _build_candidate_context_block(
                     pretty = k.replace("_", " ")
                     lines.append(f"  • {pretty}: {v}")
             if lines:
-                bits.append("STANDARD ANSWERS:\n" + "\n".join(lines))
+                identity_bits.append("STANDARD ANSWERS:\n" + "\n".join(lines))
         except Exception:
             pass
 
-    return ("\n\n".join(bits) or "(no context available)"), (profile.id if profile else None)
+    # Identity hash: only the parts that are stable per (profile, resume,
+    # answer library). Repeat questions across different JDs hit cache.
+    import hashlib
+    identity_blob = "\n\n".join(identity_bits) or "(no identity context)"
+    identity_hash = hashlib.sha256(identity_blob.encode("utf-8")).hexdigest()[:16]
+
+    bits = jd_bits + identity_bits
+    return (
+        "\n\n".join(bits) or "(no context available)",
+        (profile.id if profile else None),
+        identity_hash,
+    )
 
 
 @router.post("/extension/draft_answers")
@@ -1238,21 +1314,16 @@ def api_extension_draft_answers(
     if not body.questions:
         return {"drafts": [], "profile_id": None}
 
-    context_text, matched_pid = _build_candidate_context_block(
+    context_text, matched_pid, identity_hash = _build_candidate_context_block(
         db, user, body.url, body.profile_id,
     )
-    # Cache by a hash of the candidate-context only (not the question or
-    # profile id). Resume updates / answer-library updates change the hash
-    # and naturally invalidate stale cached answers.
-    import hashlib
-    context_hash = hashlib.sha256(context_text.encode("utf-8")).hexdigest()[:16]
     client = Anthropic(api_key=app_config.ANTHROPIC_API_KEY)
 
     drafts: list[dict] = []
     for q in body.questions:
         try:
             answer = _draft_one(client, q, context_text,
-                                profile_id=matched_pid, context_hash=context_hash)
+                                profile_id=matched_pid, context_hash=identity_hash)
         except Exception as e:
             drafts.append({"id": q.id, "answer": "", "error": str(e)[:200]})
             continue
@@ -1544,7 +1615,168 @@ def api_retry_errors(
     return {"requeued": requeued}
 
 
-# ───────────────── calendar (light) ─────────────────
+# ───────────────── personal calendar (interview panels) ─────────────────
+
+class CalendarEventIn(BaseModel):
+    title: str
+    start_at: str       # ISO 8601
+    end_at: str
+    color: Optional[str] = "indigo"
+    notes: Optional[str] = None
+    job_url_id: Optional[int] = None
+    profile_ids: Optional[list[int]] = None
+    status: Optional[str] = None   # pending / passed / failed
+
+
+_PALETTE = {"indigo", "emerald", "amber", "rose", "violet", "sky", "fuchsia"}
+_EV_STATUSES = {"pending", "passed", "failed"}
+
+
+def _ev_out(e: CalendarEvent) -> dict:
+    try:
+        profile_ids = json.loads(e.profile_ids_json) if e.profile_ids_json else []
+        if not isinstance(profile_ids, list):
+            profile_ids = []
+    except (TypeError, ValueError):
+        profile_ids = []
+    return {
+        "id": e.id, "title": e.title,
+        "start_at": _iso(e.start_at), "end_at": _iso(e.end_at),
+        "color": e.color, "notes": e.notes,
+        "job_url_id": e.job_url_id,
+        "profile_ids": [int(p) for p in profile_ids if isinstance(p, int)],
+        "status": e.status or "pending",
+    }
+
+
+def _validate_profile_ids(db: Session, user, ids: Optional[list[int]]) -> list[int]:
+    """Filter incoming profile_ids to ones the user actually owns. Silently
+    drops invalid ids rather than 400ing — the frontend shouldn't be sending
+    them in the first place."""
+    if not ids:
+        return []
+    rows = (
+        db.query(Profile.id)
+        .filter(Profile.user_id == user.id)
+        .filter(Profile.id.in_(ids))
+        .all()
+    )
+    valid = {pid for (pid,) in rows}
+    return [pid for pid in ids if pid in valid]
+
+
+def _parse_iso(s: str) -> datetime:
+    s = (s or "").strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s)
+
+
+@router.get("/admin/calendar-events")
+def api_list_events(
+    from_at: str = Query(..., alias="from"),
+    to_at:   str = Query(..., alias="to"),
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    """Return events whose [start_at, end_at) overlap the [from, to) range."""
+    try:
+        f = _parse_iso(from_at)
+        t = _parse_iso(to_at)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid from/to (must be ISO 8601).")
+    rows = (
+        db.query(CalendarEvent)
+        .filter(CalendarEvent.user_id == me.id)
+        .filter(CalendarEvent.start_at < t)
+        .filter(CalendarEvent.end_at > f)
+        .order_by(CalendarEvent.start_at.asc())
+        .all()
+    )
+    return {"events": [_ev_out(e) for e in rows]}
+
+
+@router.post("/admin/calendar-events")
+def api_create_event(
+    body: CalendarEventIn,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(400, "Title is required.")
+    try:
+        s = _parse_iso(body.start_at)
+        e = _parse_iso(body.end_at)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid start_at / end_at (must be ISO 8601).")
+    if e <= s:
+        raise HTTPException(400, "end_at must be after start_at.")
+    color = body.color if body.color in _PALETTE else "indigo"
+    profile_ids = _validate_profile_ids(db, me, body.profile_ids)
+    status = body.status if body.status in _EV_STATUSES else "pending"
+    ev = CalendarEvent(
+        user_id=me.id, title=title[:255],
+        start_at=s, end_at=e, color=color,
+        notes=(body.notes.strip() if body.notes and body.notes.strip() else None),
+        job_url_id=body.job_url_id,
+        profile_ids_json=json.dumps(profile_ids) if profile_ids else None,
+        status=status,
+    )
+    db.add(ev)
+    db.commit()
+    db.refresh(ev)
+    return {"event": _ev_out(ev)}
+
+
+@router.post("/admin/calendar-events/{eid}/update")
+def api_update_event(
+    eid: int, body: CalendarEventIn,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    ev = db.get(CalendarEvent, eid)
+    if not ev or ev.user_id != me.id:
+        raise HTTPException(404, "Event not found.")
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(400, "Title is required.")
+    try:
+        s = _parse_iso(body.start_at)
+        e = _parse_iso(body.end_at)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid start_at / end_at.")
+    if e <= s:
+        raise HTTPException(400, "end_at must be after start_at.")
+    ev.title = title[:255]
+    ev.start_at = s
+    ev.end_at = e
+    ev.color = body.color if body.color in _PALETTE else ev.color
+    ev.notes = (body.notes.strip() if body.notes and body.notes.strip() else None)
+    ev.job_url_id = body.job_url_id
+    profile_ids = _validate_profile_ids(db, me, body.profile_ids)
+    ev.profile_ids_json = json.dumps(profile_ids) if profile_ids else None
+    if body.status in _EV_STATUSES:
+        ev.status = body.status
+    db.commit()
+    return {"event": _ev_out(ev)}
+
+
+@router.post("/admin/calendar-events/{eid}/delete")
+def api_delete_event(
+    eid: int,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    ev = db.get(CalendarEvent, eid)
+    if not ev or ev.user_id != me.id:
+        raise HTTPException(404, "Event not found.")
+    db.delete(ev)
+    db.commit()
+    return {"ok": True}
+
+
+# ───────────────── search (existing) ─────────────────
 
 @router.get("/admin/search")
 def api_search(
@@ -1679,4 +1911,92 @@ def api_calendar(
         "today": today.isoformat(),
         "prev": {"year": y - 1 if m == 1 else y, "month": 12 if m == 1 else m - 1},
         "next": {"year": y + 1 if m == 12 else y, "month": 1 if m == 12 else m + 1},
+    }
+
+
+# ── Super-admin endpoints ─────────────────────────────────────────────────
+# Platform-wide visibility for users marked User.is_admin=1. The regular
+# /api/admin/* endpoints scope to the logged-in user's own data; these
+# /api/superadmin/* endpoints cross that boundary.
+
+@router.get("/superadmin/users")
+def api_superadmin_users(
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_admin),
+):
+    """Return every user on the platform with quick activity counts."""
+    users = db.query(User).order_by(User.created_at.desc()).all()
+    out: list[dict] = []
+    for u in users:
+        prof_count = db.query(Profile).filter(Profile.user_id == u.id).count()
+        # Total jobs across all profiles this user owns.
+        job_count = (
+            db.query(JobUrl)
+            .join(Batch, JobUrl.batch_id == Batch.id)
+            .join(Profile, Batch.profile_id == Profile.id)
+            .filter(Profile.user_id == u.id)
+            .count()
+        )
+        applied_count = (
+            db.query(JobUrl)
+            .join(Batch, JobUrl.batch_id == Batch.id)
+            .join(Profile, Batch.profile_id == Profile.id)
+            .filter(Profile.user_id == u.id)
+            .filter(JobUrl.application_status == "applied")
+            .count()
+        )
+        out.append({
+            "id": u.id,
+            "email": u.email,
+            "is_admin": bool(u.is_admin),
+            "created_at": _iso(u.created_at),
+            "profile_count": prof_count,
+            "job_count": job_count,
+            "applied_count": applied_count,
+        })
+    return {"users": out}
+
+
+@router.get("/superadmin/users/{uid}")
+def api_superadmin_user_detail(
+    uid: int,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_admin),
+):
+    """All profiles + batches + status breakdown for one user."""
+    u = db.get(User, uid)
+    if u is None:
+        raise HTTPException(404, "No such user.")
+    profiles = db.query(Profile).filter(Profile.user_id == u.id).order_by(Profile.created_at.desc()).all()
+    profile_blocks: list[dict] = []
+    for p in profiles:
+        batches = (
+            db.query(Batch)
+            .filter(Batch.profile_id == p.id)
+            .order_by(Batch.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        batch_blocks: list[dict] = []
+        for b in batches:
+            total = db.query(JobUrl).filter(JobUrl.batch_id == b.id).count()
+            done = db.query(JobUrl).filter(JobUrl.batch_id == b.id, JobUrl.status == STATUS_DONE).count()
+            applied = db.query(JobUrl).filter(
+                JobUrl.batch_id == b.id, JobUrl.application_status == "applied"
+            ).count()
+            batch_blocks.append({
+                "id": b.id, "created_at": _iso(b.created_at),
+                "total": total, "done": done, "applied": applied,
+            })
+        profile_blocks.append({
+            "id": p.id, "name": p.name, "has_base_resume": bool(p.base_resume_filename),
+            "created_at": _iso(p.created_at),
+            "batches": batch_blocks,
+        })
+    return {
+        "user": {
+            "id": u.id, "email": u.email, "is_admin": bool(u.is_admin),
+            "created_at": _iso(u.created_at),
+        },
+        "profiles": profile_blocks,
     }

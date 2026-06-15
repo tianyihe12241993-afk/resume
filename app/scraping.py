@@ -514,6 +514,79 @@ def _haiku_extract_from_html(html: str, url: str) -> Optional[dict]:
     }
 
 
+def _fetch_with_playwright(url: str) -> Optional[dict]:
+    """Last-resort SPA-rendered fetch. Launches a headless Chromium, renders
+    the page with JS, then runs the rendered HTML through the existing
+    extractors (`_extract_from_html` heuristic, then `_haiku_extract_from_html`).
+
+    Returns ``None`` on any failure — caller treats this as 'no info' and
+    raises the usual scrape-failed error.
+
+    Heavy: ~2–5s per call. Only invoked after all plain-HTTP fallbacks have
+    returned empty.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+
+    html = ""
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            try:
+                ctx = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 800},
+                )
+                # Block heavy resources we never need for text extraction.
+                def _route(route):
+                    if route.request.resource_type in ("image", "media", "font"):
+                        route.abort()
+                    else:
+                        route.continue_()
+                ctx.route("**/*", _route)
+
+                page = ctx.new_page()
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+                except Exception:
+                    # Even on nav timeout, the partial DOM may have what we need.
+                    pass
+                # Hash-routed SPAs (JobDiva, Bullhorn OSCP, …) settle the JD
+                # *after* networkidle, so wait on actual body text length.
+                # Fall through on timeout — the partial DOM is still worth a try.
+                try:
+                    page.wait_for_function(
+                        "document.body && document.body.innerText.length > 1500",
+                        timeout=15_000,
+                    )
+                except Exception:
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=4_000)
+                    except Exception:
+                        pass
+                html = page.content() or ""
+            finally:
+                browser.close()
+    except Exception:
+        return None
+
+    if not html or len(html) < 500:
+        return None
+    info = _extract_from_html(html)
+    if len((info.get("description") or "")) >= 400:
+        return info
+    haiku = _haiku_extract_from_html(html, url)
+    if haiku and haiku.get("description"):
+        return haiku
+    return None
+
+
 def fetch_job_posting(url: str, *, bypass_cache: bool = False) -> dict:
     """Return {company, title, location, description}.
 
@@ -608,5 +681,12 @@ def _fetch_job_posting_uncached(url: str) -> dict:
         haiku_info = _haiku_extract_from_html(last_html, last_url_used or url)
         if haiku_info and haiku_info.get("description"):
             return _finalize(haiku_info)
+
+    # SPA fallback: render the page in Chromium and try the extractors again.
+    # Fires for ATS portals that ship an empty shell to plain HTTP (ADP,
+    # JobDiva, Bullhorn OSCP, Zoho Recruit, Dayforce, RippleHire, SaasHR, …).
+    pw_info = _fetch_with_playwright(url)
+    if pw_info and pw_info.get("description"):
+        return _finalize(pw_info)
 
     raise RuntimeError(f"Could not fetch job page: {url} ({last_err})")
