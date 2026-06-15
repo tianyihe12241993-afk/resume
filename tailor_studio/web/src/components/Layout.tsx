@@ -8,7 +8,9 @@ import clsx from 'clsx'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useAuth, useLogout } from '@/hooks/useAuth'
+import { useChatNotifications } from '@/hooks/useChatNotifications'
 import { Avatar } from '@/components/charts'
+import { useEffect } from 'react'
 
 function BrandMark() {
   return (
@@ -42,6 +44,12 @@ export default function Layout() {
     refetchInterval: 15_000,
   })
   const pendingMembers = members?.pending ?? 0
+
+  // App-wide team-chat notifications (badge + desktop notify + title counter).
+  const chatUnread = useChatNotifications(user ?? undefined)
+  useEffect(() => {
+    document.title = chatUnread > 0 ? `(${chatUnread}) Tailor Studio` : 'Tailor Studio'
+  }, [chatUnread])
   const onSearch = (e: React.FormEvent) => {
     e.preventDefault()
     if (q.trim()) {
@@ -75,7 +83,7 @@ export default function Layout() {
           <SideLink to="/dashboard" icon={LayoutDashboard} badge={unreadCount}>Dashboard</SideLink>
           <SideLink to="/profiles" icon={FolderKanban}>Profiles</SideLink>
           <SideLink to="/search" icon={Search}>Search</SideLink>
-          <SideLink to="/chat" icon={MessagesSquare}>Team chat</SideLink>
+          <SideLink to="/chat" icon={MessagesSquare} badge={chatUnread}>Team chat</SideLink>
           <SideLink to="/calendar" icon={CalendarIcon}>Calendar</SideLink>
           <SideLink to="/answers" icon={ClipboardList}>Answers</SideLink>
           {user?.is_admin && (

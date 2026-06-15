@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Send, Reply, X } from 'lucide-react'
+import { Send, Reply, X, Bell } from 'lucide-react'
 import clsx from 'clsx'
 import { api } from '@/lib/api'
 import { Avatar } from '@/components/charts'
@@ -51,6 +51,13 @@ export default function ChatPage() {
   const [text, setText] = useState('')
   const [replyTo, setReplyTo] = useState<ChatMsg | null>(null)
   const [members, setMembers] = useState<Member[]>([])
+  const [notifPerm, setNotifPerm] = useState<NotificationPermission | 'unsupported'>(
+    typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+  )
+  const enableNotifs = async () => {
+    if (typeof Notification === 'undefined') return
+    try { setNotifPerm(await Notification.requestPermission()) } catch { /* */ }
+  }
 
   // Mention autocomplete state
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null)
@@ -188,7 +195,19 @@ export default function ChatPage() {
           <h1 className="text-2xl font-bold text-gray-900">Team chat</h1>
           <p className="text-sm text-gray-400">Shared group chat for you and your bidders.</p>
         </div>
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex items-center gap-3 text-sm">
+          {notifPerm === 'default' && (
+            <button onClick={enableNotifs}
+                    className="inline-flex items-center gap-1 text-xs text-brand-600 hover:text-brand-800 border border-brand-200 rounded-full px-2.5 py-1">
+              <Bell className="w-3.5 h-3.5" /> Enable notifications
+            </button>
+          )}
+          {notifPerm === 'granted' && <Bell className="w-4 h-4 text-green-500" aria-label="Notifications on" />}
+          {notifPerm === 'denied' && (
+            <span className="text-xs text-gray-400" title="Allow notifications for this site in your browser settings">
+              notifications blocked
+            </span>
+          )}
           <span className={clsx('w-2 h-2 rounded-full', connected ? 'bg-green-500' : 'bg-gray-300')} />
           <span className="text-gray-500" title={onlineNames.join(', ')}>
             {connected ? `${online} online` : 'connecting…'}
