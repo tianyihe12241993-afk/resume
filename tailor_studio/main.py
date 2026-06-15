@@ -53,6 +53,15 @@ def _startup() -> None:
         logging.getLogger("tailor_studio.startup").warning(
             "Orphan-requeue failed:\n%s", traceback.format_exc(),
         )
+    # Daily job-discovery scheduler (per enabled SearchConfig).
+    try:
+        from . import scheduler
+        scheduler.start()
+    except Exception:
+        import logging, traceback
+        logging.getLogger("tailor_studio.startup").warning(
+            "Discovery scheduler failed to start:\n%s", traceback.format_exc(),
+        )
 
 
 def _start_auto_prune() -> None:

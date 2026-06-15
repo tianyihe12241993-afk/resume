@@ -39,6 +39,8 @@ class User(Base):
     # JSON blob with the user's standard form-fill answers (personal info,
     # eligibility yes/no, etc.). Used by the extension's "Fill form" button.
     answer_library_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Platform super-admin: can see all users via /api/superadmin/* endpoints.
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     profiles = relationship("Profile", back_populates="owner", cascade="all, delete-orphan")
@@ -67,6 +69,10 @@ class Profile(Base):
 
     owner = relationship("User", back_populates="profiles")
     batches = relationship("Batch", back_populates="profile", cascade="all, delete-orphan")
+    search_config = relationship(
+        "SearchConfig", back_populates="profile", uselist=False,
+        cascade="all, delete-orphan",
+    )
 
 
 class Batch(Base):
@@ -85,6 +91,8 @@ class Batch(Base):
 
 
 # Pipeline statuses.
+STATUS_DISCOVERED = "discovered"   # found + ranked by discovery, awaiting approval
+STATUS_SKIPPED = "skipped"         # user declined this discovered job
 STATUS_PENDING = "pending"
 STATUS_FETCHING = "fetching"
 STATUS_ANALYZING = "analyzing"
@@ -121,6 +129,13 @@ class JobUrl(Base):
     # callers normalize via app.work_type.
     work_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Discovery metadata (NULL for manually-pasted URLs).
+    # source: e.g. "jobspy:linkedin", "ats:greenhouse", "manual".
+    source: Mapped[Optional[str]] = mapped_column(String(48), nullable=True)
+    # score: relevance 0-100 vs the profile (app/scoring); reason is a one-liner.
+    score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    score_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     docx_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     pdf_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -169,6 +184,64 @@ class JobUrl(Base):
     batch = relationship("Batch", back_populates="urls")
 
 
+class SearchConfig(Base):
+    """Per-profile job-discovery settings, edited from the UI. One row per profile.
+
+    List-valued fields are stored newline/comma separated and parsed in
+    tailor_studio.discovery to keep the schema simple.
+    """
+    __tablename__ = "search_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profile.id", ondelete="CASCADE"), nullable=False, unique=True,
+    )
+
+    keywords: Mapped[str] = mapped_column(Text, nullable=False, default="")        # newline-separated
+    locations: Mapped[str] = mapped_column(Text, nullable=False, default="")       # newline-separated
+    sites: Mapped[str] = mapped_column(Text, nullable=False, default="indeed,linkedin")  # comma list
+    remote: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    hours_old: Mapped[int] = mapped_column(Integer, nullable=False, default=168)
+    results_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=40)
+    # ATS boards: newline list of "provider:slug" (e.g. greenhouse:stripe).
+    ats_companies: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    preferences: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    min_score: Mapped[int] = mapped_column(Integer, nullable=False, default=70)
+    schedule_hour: Mapped[int] = mapped_column(Integer, nullable=False, default=8)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+    profile = relationship("Profile", back_populates="search_config")
+
+
+class CalendarEvent(Base):
+    """Interview / reminder events shown on the calendar. Owned by a user;
+    optionally linked to a job (job_url_id) and/or profiles (profile_ids_json)."""
+    __tablename__ = "calendar_event"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    start_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    end_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    color: Mapped[str] = mapped_column(String(16), nullable=False, default="indigo")
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Optional link to a specific tailored job row (nullable; no hard FK so a
+    # deleted job doesn't cascade away the calendar event).
+    job_url_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # JSON list of profile ids this event relates to.
+    profile_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # pending / passed / failed
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
 _engine = create_engine(
     f"sqlite:///{config.DB_PATH}",
     connect_args={"check_same_thread": False},
@@ -198,6 +271,9 @@ def init_db() -> None:
             ("note_updated_at",     "DATETIME"),
             ("note_seen_at",        "DATETIME"),
             ("apply_count",         "INTEGER NOT NULL DEFAULT 0"),
+            ("source",              "VARCHAR(48)"),
+            ("score",               "INTEGER"),
+            ("score_reason",        "TEXT"),
         ]:
             if col_name not in cols:
                 conn.execute(text(f"ALTER TABLE job_url ADD COLUMN {col_name} {col_sql}"))
@@ -214,6 +290,8 @@ def init_db() -> None:
         user_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(user)"))}
         if "answer_library_json" not in user_cols:
             conn.execute(text("ALTER TABLE user ADD COLUMN answer_library_json TEXT"))
+        if "is_admin" not in user_cols:
+            conn.execute(text("ALTER TABLE user ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"))
         if "answer_library_json" not in prof_cols:
             conn.execute(text("ALTER TABLE profile ADD COLUMN answer_library_json TEXT"))
             # Backfill: if a user already saved answers at user-level, seed

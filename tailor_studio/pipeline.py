@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from app.adjacency_proposer import propose_adjacencies
 from app.bullet_rewriter import rewrite_and_validate
@@ -27,10 +28,10 @@ from app.tailoring import (
     tailor_resume,
 )
 
-from . import config, storage
+from . import config, discovery, scoring, storage
 from .db import (
     Batch, JobUrl, Profile, SessionLocal,
-    STATUS_ANALYZING, STATUS_DONE, STATUS_ERROR, STATUS_FETCHING,
+    STATUS_ANALYZING, STATUS_DISCOVERED, STATUS_DONE, STATUS_ERROR, STATUS_FETCHING,
     STATUS_NEEDS_JD, STATUS_PENDING, STATUS_TAILORING,
 )
 
@@ -341,6 +342,67 @@ def _get_executor() -> ThreadPoolExecutor:
 
 def enqueue(job_url_id: int) -> None:
     _get_executor().submit(_run_single, job_url_id)
+
+
+# ── discovery (the stage in front of tailoring) ─────────────────────────────
+
+_PACIFIC = ZoneInfo("America/Los_Angeles")
+
+# Guard against overlapping discovery runs for the same profile.
+_discovering: set[int] = set()
+_discovering_lock = threading.Lock()
+
+
+def _run_discovery(profile_id: int) -> None:
+    """Find + score fresh jobs for a profile and store them as a discovery batch
+    of `discovered` JobUrls (awaiting the user's approval to tailor)."""
+    db = SessionLocal()
+    try:
+        profile = db.get(Profile, profile_id)
+        if profile is None or profile.search_config is None:
+            return
+        cfg = profile.search_config
+
+        jobs = discovery.discover(db, profile)
+        if not jobs:
+            return
+        scoring.score_jobs(profile.id, jobs, preferences=cfg.preferences or "")
+
+        today = datetime.now(_PACIFIC).strftime("%Y-%m-%d")
+        batch = Batch(profile_id=profile.id, label=f"Discovery {today}")
+        db.add(batch)
+        db.flush()
+        for jb in jobs:
+            db.add(JobUrl(
+                batch_id=batch.id,
+                url=jb["url"],
+                status=STATUS_DISCOVERED,
+                company=(jb.get("company") or None),
+                title=(jb.get("title") or None),
+                location=(jb.get("location") or None),
+                work_type=(jb.get("work_type") or None),
+                description=(jb.get("description") or None),
+                source=jb.get("source"),
+                score=jb.get("score"),
+                score_reason=jb.get("score_reason"),
+            ))
+        db.commit()
+    except Exception:
+        traceback.print_exc()
+    finally:
+        db.close()
+        with _discovering_lock:
+            _discovering.discard(profile_id)
+
+
+def enqueue_discovery(profile_id: int) -> bool:
+    """Queue a discovery run for a profile. Returns False if one is already running."""
+    with _discovering_lock:
+        if profile_id in _discovering:
+            return False
+        _discovering.add(profile_id)
+    _get_executor().submit(_run_discovery, profile_id)
+    return True
 
 
 def requeue_orphans() -> int:

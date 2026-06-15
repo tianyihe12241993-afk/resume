@@ -18,8 +18,9 @@ from sqlalchemy.orm import Session
 
 from . import auth, config, pipeline, storage
 from .db import (
-    Batch, CalendarEvent, JobUrl, Profile, User, get_db,
-    APP_STATUSES, STATUS_DONE, STATUS_ERROR, STATUS_NEEDS_JD, STATUS_PENDING,
+    Batch, CalendarEvent, JobUrl, Profile, SearchConfig, User, get_db,
+    APP_STATUSES, STATUS_DISCOVERED, STATUS_DONE, STATUS_ERROR, STATUS_NEEDS_JD,
+    STATUS_PENDING, STATUS_SKIPPED,
 )
 
 
@@ -156,6 +157,9 @@ def _job_out(j: JobUrl, *, with_coverage: bool = False) -> dict:
         "application_note": j.application_note,
         "application_source": j.application_source,
         "apply_count": j.apply_count or 0,
+        "source": j.source,
+        "score": j.score,
+        "score_reason": j.score_reason,
         "has_docx": bool(j.docx_filename),
         "download_count": j.download_count,
         "upload_filename": j.upload_filename,
@@ -187,20 +191,25 @@ def _job_out(j: JobUrl, *, with_coverage: bool = False) -> dict:
 
 
 def _batch_summary(jobs: list[JobUrl]) -> dict:
-    total = len(jobs)
-    done = sum(1 for j in jobs if j.status == STATUS_DONE)
-    needs_jd = sum(1 for j in jobs if j.status == STATUS_NEEDS_JD)
-    errors = sum(1 for j in jobs if j.status == STATUS_ERROR)
+    # Discovered/skipped jobs are pre-pipeline (awaiting approval) — exclude
+    # them from the tailoring progress math so a discovery batch doesn't read
+    # as "100% in flight".
+    pipeline_jobs = [j for j in jobs if j.status not in (STATUS_DISCOVERED, STATUS_SKIPPED)]
+    total = len(pipeline_jobs)
+    done = sum(1 for j in pipeline_jobs if j.status == STATUS_DONE)
+    needs_jd = sum(1 for j in pipeline_jobs if j.status == STATUS_NEEDS_JD)
+    errors = sum(1 for j in pipeline_jobs if j.status == STATUS_ERROR)
     in_flight = sum(
-        1 for j in jobs
+        1 for j in pipeline_jobs
         if j.status not in (STATUS_DONE, STATUS_NEEDS_JD, STATUS_ERROR)
     )
-    applied = sum(1 for j in jobs if j.application_status == "applied")
+    discovered = sum(1 for j in jobs if j.status == STATUS_DISCOVERED)
+    applied = sum(1 for j in pipeline_jobs if j.application_status == "applied")
     pct = round(100 * done / total) if total else 0
     applied_pct = round(100 * applied / total) if total else 0
     return {
         "total": total, "done": done, "in_flight": in_flight,
-        "needs_jd": needs_jd, "errors": errors,
+        "needs_jd": needs_jd, "errors": errors, "discovered": discovered,
         "percent": pct, "applied": applied, "applied_percent": applied_pct,
     }
 
@@ -1384,6 +1393,134 @@ def api_batch_detail(
         "jobs": [_job_out(j, with_coverage=True) for j in jobs],
         "summary": _batch_summary(jobs),
     }
+
+
+# ───────────────── job discovery ─────────────────
+
+def _search_config_out(c: Optional[SearchConfig]) -> Optional[dict]:
+    if c is None:
+        return None
+    return {
+        "keywords": c.keywords, "locations": c.locations, "sites": c.sites,
+        "remote": c.remote, "hours_old": c.hours_old, "results_limit": c.results_limit,
+        "ats_companies": c.ats_companies, "preferences": c.preferences,
+        "min_score": c.min_score, "schedule_hour": c.schedule_hour,
+        "enabled": c.enabled,
+    }
+
+
+def _get_or_create_config(db: Session, profile_id: int) -> SearchConfig:
+    c = db.query(SearchConfig).filter(SearchConfig.profile_id == profile_id).first()
+    if c is None:
+        c = SearchConfig(profile_id=profile_id)
+        db.add(c)
+        db.commit()
+        db.refresh(c)
+    return c
+
+
+def _config_has_inputs(cfg: SearchConfig) -> bool:
+    has_kw = any(ln.strip() for ln in (cfg.keywords or "").splitlines())
+    has_ats = any(ln.strip() for ln in (cfg.ats_companies or "").splitlines())
+    return has_kw or has_ats
+
+
+@router.get("/admin/profiles/{pid}/search-config")
+def api_search_config_get(
+    pid: int, db: Session = Depends(get_db), me=Depends(auth.require_user),
+):
+    _user_profile(db, me, pid)
+    return {"config": _search_config_out(_get_or_create_config(db, pid))}
+
+
+class SearchConfigIn(BaseModel):
+    keywords: str = ""
+    locations: str = ""
+    sites: str = "indeed,linkedin"
+    remote: bool = True
+    hours_old: int = 168
+    results_limit: int = 40
+    ats_companies: str = ""
+    preferences: Optional[str] = None
+    min_score: int = 70
+    schedule_hour: int = 8
+    enabled: bool = False
+
+
+@router.post("/admin/profiles/{pid}/search-config")
+def api_search_config_set(
+    pid: int, body: SearchConfigIn,
+    db: Session = Depends(get_db), me=Depends(auth.require_user),
+):
+    _user_profile(db, me, pid)
+    c = _get_or_create_config(db, pid)
+    c.keywords = body.keywords
+    c.locations = body.locations
+    c.sites = body.sites
+    c.remote = bool(body.remote)
+    c.hours_old = max(1, int(body.hours_old))
+    c.results_limit = max(1, min(200, int(body.results_limit)))
+    c.ats_companies = body.ats_companies
+    c.preferences = body.preferences
+    c.min_score = max(0, min(100, int(body.min_score)))
+    c.schedule_hour = max(0, min(23, int(body.schedule_hour)))
+    c.enabled = bool(body.enabled)
+    db.commit()
+    # Re-sync the scheduler so an enabled/hour change takes effect immediately.
+    try:
+        from . import scheduler
+        scheduler.sync()
+    except Exception:
+        pass
+    return {"config": _search_config_out(c)}
+
+
+@router.post("/admin/profiles/{pid}/discover")
+def api_discover(
+    pid: int, db: Session = Depends(get_db), me=Depends(auth.require_user),
+):
+    _user_profile(db, me, pid)
+    cfg = _get_or_create_config(db, pid)
+    if not _config_has_inputs(cfg):
+        raise HTTPException(400, "Add at least one keyword or one ATS company first.")
+    started = pipeline.enqueue_discovery(pid)
+    return {
+        "started": started,
+        "message": "Discovery running." if started
+                   else "A discovery run is already in progress.",
+    }
+
+
+class ApproveIn(BaseModel):
+    job_ids: list[int]
+
+
+@router.post("/admin/batches/{bid}/approve")
+def api_approve(
+    bid: int, body: ApproveIn,
+    db: Session = Depends(get_db), me=Depends(auth.require_user),
+):
+    """Approve selected discovered jobs for tailoring; skip the rest of the batch."""
+    b = _user_batch(db, me, bid)
+    if not storage.base_resume_path(b.profile_id).exists():
+        raise HTTPException(400, "Upload a base resume for this profile first.")
+
+    selected = set(body.job_ids or [])
+    discovered = db.query(JobUrl).filter(
+        JobUrl.batch_id == bid, JobUrl.status == STATUS_DISCOVERED,
+    ).all()
+    approved = []
+    for ju in discovered:
+        if ju.id in selected:
+            ju.status = STATUS_PENDING
+            ju.error_message = None
+            approved.append(ju)
+        else:
+            ju.status = STATUS_SKIPPED
+    db.commit()
+    for ju in approved:
+        pipeline.enqueue(ju.id)
+    return {"approved": len(approved), "skipped": len(discovered) - len(approved)}
 
 
 # ───────────────── job actions ─────────────────

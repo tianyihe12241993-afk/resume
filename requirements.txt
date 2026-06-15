@@ -18,3 +18,16 @@ tzdata>=2024.1  # Windows needs this for ZoneInfo; no-op on macOS/Linux
 google-auth>=2.30.0
 google-auth-oauthlib>=1.2.0
 google-api-python-client>=2.130.0
+
+# --- Job discovery + scheduling ---
+apscheduler>=3.10           # daily discovery scheduler (in-process)
+# numpy/pandas: modern versions ship Python 3.14 wheels; python-jobspy over-pins
+# numpy==1.26.3 / pandas<3 which have NO 3.14 wheels, so install jobspy with
+# --no-deps and supply compatible versions here. See scripts/setup_env.ps1.
+numpy>=2.1
+pandas>=2.2
+markdownify>=0.13.1         # jobspy runtime dep
+regex>=2024.4.28            # jobspy runtime dep
+tls-client>=1.0.1           # jobspy runtime dep
+# python-jobspy installed separately with --no-deps (see scripts/setup_env.ps1):
+#   pip install --no-deps python-jobspy

@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useState, Fragment } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  ChevronLeft, Download, ExternalLink, RotateCw, MessageSquare,
+  ChevronLeft, Download, ExternalLink, RotateCw, MessageSquare, Sparkles, Search,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { api, type BatchDetail, type Job } from '@/lib/api'
@@ -64,6 +64,10 @@ export default function BatchDetailPage() {
   if (!data) return <div className="text-center text-gray-400 text-sm">Loading…</div>
   const { batch, profile, jobs, summary } = data
 
+  const discovered = jobs.filter((j) => j.status === 'discovered')
+  const processed = jobs.filter((j) => j.status !== 'discovered' && j.status !== 'skipped')
+  const allDiscovered = jobs.length > 0 && discovered.length === jobs.length
+
   return (
     <>
       <Link to={`/admin/profiles/${profile.id}`}
@@ -76,8 +80,10 @@ export default function BatchDetailPage() {
         <p className="text-sm text-gray-400 mt-0.5">{profile.name} · batch #{batch.id}</p>
       </div>
 
+      {discovered.length > 0 && <DiscoveryReview batchId={bid} jobs={discovered} />}
+
       {/* Slim metric strip — single row of numbers + a 4px progress bar */}
-      <div className="card px-4 py-2.5 mb-4">
+      <div className={clsx('card px-4 py-2.5 mb-4', allDiscovered && 'hidden')}>
         <div className="flex items-center gap-5 text-sm flex-wrap">
           <div className="flex items-baseline gap-1.5">
             <span className="text-xs uppercase tracking-wider text-gray-400 font-semibold">Tailored</span>
@@ -103,8 +109,9 @@ export default function BatchDetailPage() {
         </div>
       </div>
 
+      {!allDiscovered && (<>
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-        <h2 className="text-sm font-semibold text-gray-600">Jobs ({jobs.length})</h2>
+        <h2 className="text-sm font-semibold text-gray-600">Jobs ({processed.length})</h2>
         <div className="flex items-center gap-2">
           {summary.errors > 0 && (
             <button onClick={() => retryAll.mutate()} className="btn-danger text-xs py-1.5 px-3">
@@ -133,7 +140,7 @@ export default function BatchDetailPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {jobs.map((j) => (
+              {processed.map((j) => (
                 <AdminRow
                   key={j.id}
                   job={j}
@@ -147,13 +154,14 @@ export default function BatchDetailPage() {
                   }}
                 />
               ))}
-              {jobs.length === 0 && (
+              {processed.length === 0 && (
                 <tr><td colSpan={5} className="p-10 text-center text-sm text-gray-400">No jobs yet.</td></tr>
               )}
             </tbody>
           </table>
         </div>
       </div>
+      </>)}
 
       {manualJob && (
         <ManualJdDialog
@@ -176,8 +184,128 @@ export default function BatchDetailPage() {
   )
 }
 
-function Th({ className, children }: { className?: string; children: React.ReactNode }) {
+function Th({ className, children }: { className?: string; children?: React.ReactNode }) {
   return <th className={clsx('px-3 py-2.5 font-semibold', className)}>{children}</th>
+}
+
+function scoreColor(s: number | null | undefined): string {
+  if (s == null) return 'bg-slate-100 text-slate-500'
+  if (s >= 75) return 'bg-green-100 text-green-700'
+  if (s >= 50) return 'bg-amber-100 text-amber-800'
+  return 'bg-red-100 text-red-600'
+}
+
+// ── Review ranked discoveries; pick which to tailor ──────────────────────────
+function DiscoveryReview({ batchId, jobs }: { batchId: number; jobs: Job[] }) {
+  const qc = useQueryClient()
+  const ranked = [...jobs].sort((a, b) => (b.score ?? -1) - (a.score ?? -1))
+  const anyScored = ranked.some((j) => j.score != null)
+  const [sel, setSel] = useState<Set<number>>(
+    () => new Set(ranked.filter((j) => !anyScored || (j.score ?? 0) >= 50).map((j) => j.id)),
+  )
+  const [expanded, setExpanded] = useState<number | null>(null)
+
+  const approve = useMutation({
+    mutationFn: (ids: number[]) =>
+      api.post<{ approved: number; skipped: number }>(`/api/admin/batches/${batchId}/approve`, { job_ids: ids }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/batch', batchId] }),
+  })
+
+  const toggle = (id: number) =>
+    setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const allChecked = sel.size === ranked.length
+  const toggleAll = () => setSel(allChecked ? new Set() : new Set(ranked.map((j) => j.id)))
+
+  return (
+    <div className="card overflow-hidden mb-6 border-brand-200">
+      <div className="bg-brand-50/60 border-b border-brand-100 px-5 py-3 flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <Sparkles className="w-4 h-4 text-brand-600" />
+          <h2 className="text-sm font-semibold text-gray-800">
+            Review discoveries — {ranked.length} found, {sel.size} selected
+          </h2>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => approve.mutate([])} disabled={approve.isPending}
+                  className="btn-secondary text-xs py-1.5 px-3">Skip all</button>
+          <button onClick={() => approve.mutate([...sel])}
+                  disabled={approve.isPending || sel.size === 0}
+                  className="btn-primary text-xs py-1.5 px-3">
+            <Search className="w-3.5 h-3.5" />
+            {approve.isPending ? 'Submitting…' : `Tailor selected (${sel.size})`}
+          </button>
+        </div>
+      </div>
+
+      {approve.isError && <div className="px-5 pt-3"><Alert variant="error">{(approve.error as Error).message}</Alert></div>}
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm table-fixed">
+          <thead className="bg-slate-50 border-b border-slate-200">
+            <tr className="text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
+              <Th className="w-10 text-center">
+                <input type="checkbox" checked={allChecked} onChange={toggleAll}
+                       className="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500 cursor-pointer" />
+              </Th>
+              <Th className="w-[64px] text-center">Score</Th>
+              <Th className="w-[160px]">Company</Th>
+              <Th>Title</Th>
+              <Th className="w-[140px]">Location</Th>
+              <Th className="w-[110px]">Source</Th>
+              <Th className="w-[80px] text-center">JD</Th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {ranked.map((j) => (
+              <Fragment key={j.id}>
+                <tr className="hover:bg-slate-50/80 transition">
+                  <td className="px-3 py-2 text-center">
+                    <input type="checkbox" checked={sel.has(j.id)} onChange={() => toggle(j.id)}
+                           className="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500 cursor-pointer" />
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    <span className={clsx('inline-block px-2 py-0.5 rounded-full text-xs font-semibold tabular-nums', scoreColor(j.score))}>
+                      {j.score ?? '—'}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-gray-900 truncate" title={j.company || ''}>
+                    {j.company || <span className="text-gray-300">—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-gray-900 truncate" title={j.score_reason || j.title || ''}>
+                    <a href={j.url} target="_blank" rel="noopener noreferrer" className="hover:underline">
+                      {j.title || <span className="text-gray-300">—</span>}
+                    </a>
+                    {j.score_reason && <div className="text-[11px] text-gray-400 truncate">{j.score_reason}</div>}
+                  </td>
+                  <td className="px-3 py-2 text-gray-500 text-xs truncate" title={j.location || ''}>
+                    {j.location || <span className="text-gray-300">—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-gray-500 text-xs truncate" title={j.source || ''}>
+                    {j.source || '—'}
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    <button onClick={() => setExpanded(expanded === j.id ? null : j.id)}
+                            className="text-xs font-medium text-brand-600 hover:text-brand-800">
+                      {expanded === j.id ? 'Hide' : 'Preview'}
+                    </button>
+                  </td>
+                </tr>
+                {expanded === j.id && (
+                  <tr>
+                    <td colSpan={7} className="px-5 py-3 bg-slate-50">
+                      <p className="text-xs text-gray-600 whitespace-pre-wrap max-h-60 overflow-y-auto">
+                        {j.description || 'No description captured — it will be fetched when tailoring.'}
+                      </p>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
 }
 
 function UploadVerdictPill({

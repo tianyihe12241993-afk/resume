@@ -148,3 +148,12 @@ def require_user(request: Request) -> User:
     if user is None:
         raise HTTPException(status_code=401, detail="Not authenticated.")
     return user
+
+
+def require_admin(request: Request) -> User:
+    """Like require_user, but additionally requires User.is_admin. Used by the
+    platform-wide /api/superadmin/* endpoints."""
+    user = require_user(request)
+    if not bool(getattr(user, "is_admin", False)):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return user
