@@ -6,13 +6,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import api, auth, config
-from .db import Batch, JobUrl, Profile, get_session, init_db
+from . import api, auth, chat, config
+from .db import Batch, ChatMessage, JobUrl, Profile, User, get_session, init_db
 
 
 app = FastAPI(title="resume-tailor-studio", version="0.1.0")
@@ -31,6 +31,48 @@ app.add_middleware(
 
 app.include_router(api.public_router)
 app.include_router(api.router)
+
+
+@app.websocket("/ws/chat")
+async def chat_ws(websocket: WebSocket):
+    """Team group chat. Authenticates off the session cookie sent on the
+    upgrade handshake, then streams messages to/from all connected members."""
+    uid = auth.user_id_from_token(websocket.cookies.get(config.SESSION_COOKIE))
+    if uid is None:
+        await websocket.close(code=1008)
+        return
+    db = get_session()
+    try:
+        user = db.get(User, uid)
+        if user is None:
+            await websocket.close(code=1008)
+            return
+        name = chat.display_name(user.email)
+    finally:
+        db.close()
+
+    await chat.manager.connect(websocket, {"id": uid, "name": name})
+    await chat.manager.broadcast(chat.manager.presence_payload())
+    try:
+        while True:
+            data = await websocket.receive_json()
+            body = (data.get("body") or "").strip() if isinstance(data, dict) else ""
+            if not body:
+                continue
+            db = get_session()
+            try:
+                m = chat.save_message(db, uid, name, body[:4000])
+                payload = chat.message_payload(m)
+            finally:
+                db.close()
+            await chat.manager.broadcast(payload)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        await chat.manager.disconnect(websocket)
+        await chat.manager.broadcast(chat.manager.presence_payload())
 
 
 @app.on_event("startup")

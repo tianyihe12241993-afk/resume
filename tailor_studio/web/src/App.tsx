@@ -9,6 +9,7 @@ import BatchDetail from '@/pages/admin/BatchDetail'
 import Calendar from '@/pages/admin/Calendar'
 import Search from '@/pages/admin/Search'
 import Answers from '@/pages/admin/Answers'
+import Chat from '@/pages/admin/Chat'
 import { useAuth } from '@/hooks/useAuth'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -38,6 +39,7 @@ export default function App() {
         <Route path="/calendar" element={<Calendar />} />
         <Route path="/search" element={<Search />} />
         <Route path="/answers" element={<Answers />} />
+        <Route path="/chat" element={<Chat />} />
         {/* Legacy admin paths still target /admin/* — register the same components there. */}
         <Route path="/admin" element={<Navigate to="/dashboard" replace />} />
         <Route path="/admin/profiles" element={<Profiles />} />

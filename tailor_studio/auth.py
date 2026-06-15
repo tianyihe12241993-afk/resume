@@ -95,8 +95,10 @@ def clear_session(response: Response) -> None:
     )
 
 
-def _read_user_id(request: Request) -> Optional[int]:
-    raw = request.cookies.get(config.SESSION_COOKIE)
+def user_id_from_token(raw: Optional[str]) -> Optional[int]:
+    """Validate a signed session cookie value and return the user id, or None.
+    Used by both HTTP requests and the chat WebSocket (which reads the cookie
+    off the upgrade handshake)."""
     if not raw:
         return None
     try:
@@ -107,6 +109,10 @@ def _read_user_id(request: Request) -> Optional[int]:
         return None
     uid = data.get("u")
     return int(uid) if isinstance(uid, int) else None
+
+
+def _read_user_id(request: Request) -> Optional[int]:
+    return user_id_from_token(request.cookies.get(config.SESSION_COOKIE))
 
 
 # ── DB-backed user lookup helpers ──────────────────────────────────────────

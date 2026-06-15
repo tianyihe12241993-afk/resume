@@ -197,6 +197,21 @@ class CalendarEvent(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 
+class ChatMessage(Base):
+    """A message in the single platform-wide team group chat (owner + bidders).
+    sender_name is snapshotted so history still shows who sent it even if the
+    user is later deleted."""
+    __tablename__ = "chat_message"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("user.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    sender_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+
 _engine = create_engine(
     f"sqlite:///{config.DB_PATH}",
     connect_args={"check_same_thread": False},

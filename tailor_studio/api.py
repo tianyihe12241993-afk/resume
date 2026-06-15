@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from . import auth, config, pipeline, storage
 from .db import (
-    Batch, CalendarEvent, JobUrl, Profile, User, get_db,
+    Batch, CalendarEvent, ChatMessage, JobUrl, Profile, User, get_db,
     APP_STATUSES, STATUS_DONE, STATUS_ERROR, STATUS_NEEDS_JD, STATUS_PENDING,
 )
 
@@ -1380,6 +1380,35 @@ def api_batch_detail(
         "profile": {"id": b.profile.id, "name": b.profile.name},
         "jobs": [_job_out(j, with_coverage=True) for j in jobs],
         "summary": _batch_summary(jobs),
+    }
+
+
+# ───────────────── team chat ─────────────────
+
+@router.get("/chat/messages")
+def api_chat_history(
+    limit: int = Query(100, ge=1, le=200),
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    """Most recent messages (oldest-first) for the shared team group chat.
+    Live updates arrive over the /ws/chat WebSocket."""
+    rows = (
+        db.query(ChatMessage)
+        .order_by(ChatMessage.id.desc())
+        .limit(limit)
+        .all()
+    )
+    rows.reverse()
+    return {
+        "me": {"id": me.id, "name": me.email.split("@")[0]},
+        "messages": [
+            {
+                "id": m.id, "user_id": m.user_id, "name": m.sender_name or "member",
+                "body": m.body, "created_at": _iso(m.created_at),
+            }
+            for m in rows
+        ],
     }
 
 

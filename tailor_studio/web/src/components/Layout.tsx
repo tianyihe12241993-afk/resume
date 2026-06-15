@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, FolderKanban, Calendar as CalendarIcon, Search, LogOut,
-  MessageSquare, ClipboardList,
+  MessageSquare, ClipboardList, MessagesSquare,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useQuery } from '@tanstack/react-query'
@@ -66,6 +66,7 @@ export default function Layout() {
           <SideLink to="/dashboard" icon={LayoutDashboard} badge={unreadCount}>Dashboard</SideLink>
           <SideLink to="/profiles" icon={FolderKanban}>Profiles</SideLink>
           <SideLink to="/search" icon={Search}>Search</SideLink>
+          <SideLink to="/chat" icon={MessagesSquare}>Team chat</SideLink>
           <SideLink to="/calendar" icon={CalendarIcon}>Calendar</SideLink>
           <SideLink to="/answers" icon={ClipboardList}>Answers</SideLink>
         </nav>
