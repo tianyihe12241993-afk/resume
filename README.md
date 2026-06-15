@@ -64,30 +64,14 @@ user only sees their own profiles, batches, and tailored outputs.
 5. Mark each row as `applied` / `not_yet` / `error` / `not_remote` in the
    status dropdown.
 
-## Auto-discovery (find jobs)
+## Adding jobs
 
-Instead of pasting URLs by hand, open a profile → **Auto-discover jobs** and set:
+Add jobs to a profile in any of these ways — all land in the same per-day batch
+and run through the tailoring pipeline:
 
-- **Keywords** + **Locations** (one per line) — searched across job boards
-  (Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google via
-  [JobSpy](https://github.com/Bunsly/JobSpy)).
-- **ATS company boards** — one `provider:slug` per line, e.g. `greenhouse:stripe`,
-  `lever:netflix`, `ashby:linear`. Lists every open role on that board.
-- **Preferences** — free text that guides the relevance ranking.
-
-Click **Discover now**. Fresh jobs are found (skipping anything already seen for
-the profile), then Claude Haiku scores each 0–100 for fit against the base
-resume. Results land as a **discovery batch** of `discovered` jobs.
-
-Open the batch → review the ranked table (score, reason, JD preview) → tick the
-ones worth pursuing → **Tailor selected**. Only those run through the normal
-tailoring pipeline; the rest are marked `skipped`. Nothing is generated until you
-approve (review-then-tailor). Enable **Run automatically every day** for a ranked
-batch waiting each morning (resumes still wait for your approval).
-
-Discovery uses `python-jobspy` + `apscheduler` — install via
-[`scripts/setup_env.ps1`](scripts/setup_env.ps1) (jobspy needs a `--no-deps`
-install on Python 3.14; the script handles it).
+- **Browser extension (recommended)** — the floating **✦ Add** button on any job
+  page, or the popup's bulk "queue open tabs". See [`extension/`](extension/).
+- **Paste URLs** — the "New batch" box on a profile (one URL per line).
 
 ## Tailoring guarantees
 

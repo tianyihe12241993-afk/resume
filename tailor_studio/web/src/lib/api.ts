@@ -65,24 +65,7 @@ export interface Profile {
   created_at: string
 }
 
-export type JobStatus =
-  | 'discovered' | 'skipped'
-  | 'pending' | 'fetching' | 'analyzing' | 'tailoring' | 'done' | 'needs_manual_jd' | 'error'
-
-export interface SearchConfig {
-  keywords: string
-  locations: string
-  sites: string
-  remote: boolean
-  exclude_easyapply: boolean
-  hours_old: number
-  results_limit: number
-  ats_companies: string
-  preferences: string | null
-  min_score: number
-  schedule_hour: number
-  enabled: boolean
-}
+export type JobStatus = 'pending' | 'fetching' | 'analyzing' | 'tailoring' | 'done' | 'needs_manual_jd' | 'error'
 
 export interface CoverageTerm { term: string; weight: number }
 
@@ -112,9 +95,6 @@ export interface Job {
   application_note: string | null
   application_source?: string | null
   apply_count?: number
-  source?: string | null
-  score?: number | null
-  score_reason?: string | null
   has_docx: boolean
   download_count: number
   upload_filename?: string | null

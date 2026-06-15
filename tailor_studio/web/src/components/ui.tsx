@@ -51,8 +51,6 @@ export function BackLink({ to, children }: { to: string; children: React.ReactNo
 }
 
 const STATUS_LABELS: Record<string, string> = {
-  discovered: 'discovered',
-  skipped: 'skipped',
   pending: 'pending',
   fetching: 'fetching',
   tailoring: 'tailoring',
