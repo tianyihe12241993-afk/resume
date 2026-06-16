@@ -64,10 +64,10 @@ export default function MembersPage() {
           <ul className="divide-y divide-slate-100 -mx-5">
             {pending.map((m) => (
               <li key={m.id} className="px-5 py-3 flex items-center gap-3">
-                <Avatar name={m.email} size={32} />
+                <Avatar name={m.name} size={32} />
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900 truncate">{m.email}</p>
-                  <p className="text-xs text-gray-400">requested {formatDateTime(m.created_at)}</p>
+                  <p className="text-sm font-medium text-gray-900 truncate">{m.name}</p>
+                  <p className="text-xs text-gray-400 truncate">{m.email} · requested {formatDateTime(m.created_at)}</p>
                 </div>
                 <button onClick={() => approve.mutate(m.id)} disabled={approve.isPending}
                         className="btn-primary text-xs py-1.5 px-3">
@@ -90,17 +90,17 @@ export default function MembersPage() {
         <ul className="divide-y divide-slate-100 -mx-5">
           {approved.map((m) => (
             <li key={m.id} className="px-5 py-3 flex items-center gap-3">
-              <Avatar name={m.email} size={32} />
+              <Avatar name={m.name} size={32} />
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-gray-900 truncate flex items-center gap-1.5">
-                  {m.email}
+                  {m.name}
                   {m.is_admin && (
                     <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-brand-700 bg-brand-50 border border-brand-200 rounded-full px-1.5 py-0.5">
                       <Shield className="w-2.5 h-2.5" /> admin
                     </span>
                   )}
                 </p>
-                <p className="text-xs text-gray-400">joined {formatDateTime(m.created_at)}</p>
+                <p className="text-xs text-gray-400 truncate">{m.email} · joined {formatDateTime(m.created_at)}</p>
               </div>
               {!m.is_admin && (
                 <button onClick={() => { if (confirm(`Remove ${m.email}? This deletes their account.`)) reject.mutate(m.id) }}
