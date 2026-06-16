@@ -85,6 +85,92 @@ Better zero matches than a stretched match. Stretched matches mislead the downst
 """
 
 
+# Same judging rules as _SYSTEM, reframed to score MANY terms in one call (huge
+# throughput + tier-load win: ~24 calls/JD -> ~2). Built by swapping only the
+# single-term framing + output block, so the rules stay identical.
+_BATCH_SYSTEM = _SYSTEM.replace(
+    "You will be given ONE JD term and the candidate's full bullet list. Return at most 3 strongest matches.",
+    "You will be given a LIST of JD terms and the candidate's full bullet list. Judge EACH term INDEPENDENTLY and return at most 3 strongest matches per term (or none).",
+).replace(
+    'OUTPUT FORMAT — strict JSON inside <json>...</json> tags. No prose outside.\n\n'
+    '{\n'
+    '  "matches": [\n'
+    '    {\n'
+    '      "job_idx": <int>,\n'
+    '      "bullet_idx": <int>,\n'
+    '      "supporting_language": "<VERBATIM substring of the cited bullet — exact characters, no paraphrasing>",\n'
+    '      "rationale": "<one sentence: why this bullet evidences the JD term>"\n'
+    '    }\n'
+    '  ]\n'
+    '}\n\n'
+    'If no bullet truthfully evidences the JD term, return {"matches": []}.',
+    'OUTPUT FORMAT — strict JSON inside <json>...</json> tags. No prose outside. '
+    'One entry per input term (exact spelling), each with its own matches:\n\n'
+    '{\n'
+    '  "results": [\n'
+    '    {"term": "<JD term, exact spelling as given>", "matches": [\n'
+    '      {"job_idx": <int>, "bullet_idx": <int>, "supporting_language": "<VERBATIM substring>", "rationale": "<one sentence>"}\n'
+    '    ]}\n'
+    '  ]\n'
+    '}\n\n'
+    'For a term with no truthful evidence, include its entry with "matches": [].',
+)
+
+
+_BATCH_CHUNK = 15  # terms per batched adjacency call
+
+
+def _propose_batch(targets, role_family: str, bullets_block: str) -> dict:
+    """One judge call for MANY terms. `targets`: list of (term, weight).
+    Returns {term: [raw match dicts]} (pre-validation)."""
+    terms_block = "\n".join(f'- "{t}" (weight {w:.2f})' for t, w in targets)
+    shared = f"JD ROLE: {role_family or '(unknown)'}\n\nRESUME BULLETS:\n{bullets_block}"
+    instr = (
+        f"JD TERMS ({len(targets)}):\n{terms_block}\n\n"
+        "For EACH term, identify up to 3 bullets whose actual content truthfully "
+        "evidences it. Quote supporting language verbatim. Better none than a "
+        "stretched match. Return one results entry per term, same spelling."
+    )
+    resp = _client().messages.create(
+        model=config.JUDGE_MODEL,
+        max_tokens=min(8000, 200 * len(targets) + 800),
+        temperature=0,
+        system=[{"type": "text", "text": _BATCH_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": shared, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": instr},
+            ],
+        }],
+    )
+    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+    parsed = _extract_tagged_json(text)
+    out: dict[str, list] = {}
+    for r in (parsed.get("results") or []):
+        if not isinstance(r, dict):
+            continue
+        term = (r.get("term") or "").strip()
+        if not term:
+            continue
+        matches = []
+        for m in (r.get("matches") or []):
+            if not isinstance(m, dict):
+                continue
+            sl = (m.get("supporting_language") or "").strip()
+            ji = m.get("job_idx")
+            bi = m.get("bullet_idx")
+            if not sl or not isinstance(ji, int) or not isinstance(bi, int):
+                continue
+            matches.append({
+                "job_idx": ji, "bullet_idx": bi,
+                "supporting_language": sl,
+                "rationale": (m.get("rationale") or "").strip(),
+            })
+        out[term] = matches
+    return out
+
+
 _client_singleton: Optional[Anthropic] = None
 
 
@@ -257,31 +343,67 @@ def propose_adjacencies(
     if not targets:
         return coverage_map
 
-    def _run(gap_entry: dict) -> tuple[dict, list[dict]]:
-        term = gap_entry.get("term", "")
-        weight = float(gap_entry.get("weight") or 0.0)
+    # Raw matches per term — from the per-term disk/mem cache where available,
+    # else judged in BATCHED calls (one call per ~15 terms instead of one per
+    # term). Cuts adjacency from ~24 calls/JD to ~2, the main fix for the
+    # rate-limit/timeout storm. Results are cached per term (same key scheme),
+    # so warm re-runs make zero calls.
+    raw_by_term: dict[str, list[dict]] = {}
+    uncached: list[tuple[str, float, str]] = []
+    for g in targets:
+        term = g.get("term", "")
+        weight = float(g.get("weight") or 0.0)
+        key = _adj_cache_key(term, weight, role_family, bullets_block)
+        cached = _adj_mem_cache.get(key)
+        if cached is None:
+            path = _ADJ_CACHE_DIR / f"{key}.json"
+            if path.exists():
+                try:
+                    cached = json.loads(path.read_text(encoding="utf-8"))
+                    _adj_mem_cache[key] = cached
+                except (OSError, json.JSONDecodeError):
+                    cached = None
+        if cached is not None:
+            raw_by_term[term] = cached
+        else:
+            uncached.append((term, weight, key))
+
+    def _save(key: str, out: list[dict]) -> None:
+        _adj_mem_cache[key] = out
         try:
-            raw = _propose_for_term(term, weight, role_family, bullets_block)
-        except Exception:
-            raw = []
-        valid = [m for m in raw if _validate_match(m, resume)]
-        return gap_entry, valid
+            _ADJ_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            (_ADJ_CACHE_DIR / f"{key}.json").write_text(
+                json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
 
-    if parallel > 1 and len(targets) > 1:
-        # Cache warmup: run the first term sequentially so the shared cache
-        # prefix (system prompt + resume bullets, identical across every term
-        # in this JD) gets written exactly once. Without it, the first ~parallel
-        # calls fire simultaneously, all miss the not-yet-written cache, and
-        # each re-writes the ~4k-token prefix at the 1.25x write rate. Warming
-        # first turns the rest into 0.1x cache reads.
-        first = _run(targets[0])
-        with ThreadPoolExecutor(max_workers=parallel) as ex:
-            futs = [ex.submit(_run, g) for g in targets[1:]]
-            results = [first] + [f.result() for f in as_completed(futs)]
-    else:
-        results = [_run(g) for g in targets]
+    if uncached:
+        chunks = [uncached[i:i + _BATCH_CHUNK] for i in range(0, len(uncached), _BATCH_CHUNK)]
 
-    by_term: dict[str, list[dict]] = {entry.get("term", ""): matches for entry, matches in results}
+        def _do_chunk(chunk):
+            try:
+                got = _propose_batch([(t, w) for t, w, k in chunk], role_family, bullets_block)
+            except Exception:
+                got = {}
+            res = {}
+            for t, w, k in chunk:
+                raw = got.get(t, [])
+                _save(k, raw)
+                res[t] = raw
+            return res
+
+        if len(chunks) > 1 and parallel > 1:
+            with ThreadPoolExecutor(max_workers=min(parallel, len(chunks))) as ex:
+                for fut in as_completed([ex.submit(_do_chunk, c) for c in chunks]):
+                    raw_by_term.update(fut.result())
+        else:
+            for c in chunks:
+                raw_by_term.update(_do_chunk(c))
+
+    by_term: dict[str, list[dict]] = {
+        term: [m for m in raw if _validate_match(m, resume)]
+        for term, raw in raw_by_term.items()
+    }
 
     promoted: list[dict] = []
     new_gap: list[dict] = []

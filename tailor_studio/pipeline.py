@@ -352,15 +352,52 @@ def _run_single(job_url_id: int) -> None:
         out_path = storage.generated_docx_path(batch.id, ju.id)
         apply_tailoring(src_docx, resume_struct, merged, out_path)
 
-        # 5. Final coverage on the rewritten doc. Re-run the adjacency proposer
-        # exactly as we did for the initial map (step 2) — otherwise the final
-        # score is measured on deterministic adjacency only (0.7x credit lost)
-        # while the initial score got the LLM-proposed bridges, making the
-        # before/after comparison apples-to-oranges and understating the lift.
+        # 5. Final coverage on the rewritten doc.
+        #
+        # EXACT matches are recomputed on the rewritten doc (deterministic).
+        # ADJACENCY is CARRIED FORWARD from the initial LLM judgment, not
+        # re-judged: tailoring only ADDS JD vocabulary — it never removes the
+        # candidate's real experience — so a term legitimately judged adjacent
+        # before is still adjacent after (unless it got promoted to exact).
+        # This makes the score (a) robust: no second batch of LLM calls that can
+        # time out under load and crater the number, and (b) MONOTONIC: promoting
+        # adjacent→exact gains 0.3x weight and new exacts add weight, so the
+        # final score can only meet or beat the initial. Tailoring never lowers
+        # the displayed score.
         final_struct = parse_resume_from_path(out_path)
-        final_cmap = build_coverage_map(spec, final_struct)
-        if config.FINAL_ADJACENCY:
-            final_cmap = propose_adjacencies(spec, final_cmap, final_struct)
+        final_det = build_coverage_map(spec, final_struct)
+        final_exact = list(final_det["hard_skills"]["covered_exact"])
+        exact_terms = {(e.get("term") or "").lower() for e in final_exact}
+        init_adj = (cmap.get("hard_skills") or {}).get("covered_adjacent") or []
+        carried_adj = [a for a in init_adj if (a.get("term") or "").lower() not in exact_terms]
+        adj_terms = {(a.get("term") or "").lower() for a in carried_adj}
+        gap = [
+            {"term": s.get("term"), "weight": float(s.get("weight") or 0.0)}
+            for s in (spec.get("hard_skills") or [])
+            if s.get("term")
+            and s["term"].lower() not in exact_terms
+            and s["term"].lower() not in adj_terms
+        ]
+        total_w = sum(float(s.get("weight") or 0.0) for s in (spec.get("hard_skills") or []))
+        covered_w = (
+            sum(float(e.get("weight") or 0.0) for e in final_exact)
+            + 0.7 * sum(float(a.get("weight") or 0.0) for a in carried_adj)
+        )
+        weighted = round(covered_w / total_w, 3) if total_w > 0 else 0.0
+        final_cmap = {
+            "hard_skills": {
+                "covered_exact": final_exact,
+                "covered_adjacent": carried_adj,
+                "gap": gap,
+            },
+            "soft_signals": final_det.get("soft_signals", {}),
+            "summary": {
+                "exact_count": len(final_exact),
+                "adjacent_count": len(carried_adj),
+                "gap_count": len(gap),
+                "weighted_coverage": weighted,
+            },
+        }
         coverage_final = dict(final_cmap["summary"])
         coverage_final["covered_exact"] = [
             {"term": c["term"], "weight": c["weight"]}
