@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Tailor Studio",
   "description": "All-in-one: add jobs to tailoring (floating Add button + bulk queue of open tabs), then on each job page download the tailored resume (.docx/PDF), draft essay answers, and audit the uploaded file. Auto-rescues stuck JDs.",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "action": {
     "default_title": "Tailor Studio: source + apply",
     "default_popup": "popup.html",

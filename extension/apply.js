@@ -224,9 +224,11 @@
     if (info.ambiguous && Array.isArray(info.candidates) && info.candidates.length) {
       renderWidget({
         tone: 'amber',
-        header: '⚠ Which candidate?',
+        header: '⚠ Pick the candidate',
         filename: '',
-        body: 'This job is tracked for several profiles — pick whose resume to use.',
+        body: info.wrong_pin
+          ? 'This job is tracked for a different profile than the one selected. Pick whose resume to use:'
+          : 'This job is tracked for several profiles — pick whose resume to use:',
         actions: info.candidates.map((c) => ({
           label: (c.has_tailored ? '✓ ' : '') + c.profile_name,
           onClick: async () => {

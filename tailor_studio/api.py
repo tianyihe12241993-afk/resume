@@ -948,39 +948,49 @@ def api_extension_resume_for(
     if not url:
         raise HTTPException(400, "Missing url.")
 
-    q = (
+    # ALL accessible matches for this URL (do NOT pre-filter by profile — we need
+    # to know about other profiles to detect a wrong/ambiguous pin).
+    all_matches = (
         db.query(JobUrl, Batch, Profile)
         .join(Batch, JobUrl.batch_id == Batch.id)
         .join(Profile, Batch.profile_id == Profile.id)
         .filter(Profile.id.in_(_accessible_pids(db, user)))
         .filter(JobUrl.url == url)
+        .order_by(JobUrl.created_at.desc())
+        .all()
     )
+    distinct_pids = {p.id for (_, _, p) in all_matches}
     if profile_id is not None:
-        q = q.filter(Profile.id == profile_id)
-    matches = q.order_by(JobUrl.created_at.desc()).all()
-    row = matches[0] if matches else None
+        pinned = [(j, b, p) for (j, b, p) in all_matches if p.id == profile_id]
+    else:
+        pinned = all_matches
 
-    # SAFETY: the same JD URL is commonly added to several profiles (5-6 people
-    # applying to the same jobs). If the caller didn't pin a profile and the URL
-    # matches MORE THAN ONE, do NOT guess — guessing served the wrong person's
-    # resume. Return the candidates so the widget makes the bidder pick.
-    if profile_id is None:
-        distinct_pids = {p.id for (_, _, p) in matches}
-        if len(distinct_pids) > 1:
-            seen: set[int] = set()
-            candidates = []
-            for (j, b, p) in matches:
-                if p.id in seen:
-                    continue
-                seen.add(p.id)
-                candidates.append({
-                    "profile_id": p.id,
-                    "profile_name": p.name,
-                    "job_id": j.id,
-                    "status": j.status,
-                    "has_tailored": j.status == STATUS_DONE and bool(j.docx_filename),
-                })
-            return {"matched": True, "ambiguous": True, "candidates": candidates, "base": None}
+    # SAFETY: the same JD is commonly tracked for several profiles (5-6 people
+    # applying to the same jobs). Two cases where we must NOT serve a resume —
+    # guessing/pinning-wrong served the wrong person's file:
+    #   (a) no profile pinned and the URL matches >1 profile, or
+    #   (b) a profile IS pinned but the URL belongs to OTHER profile(s), not it.
+    # In both, return the candidates so the widget makes the bidder pick.
+    wrong_pin = profile_id is not None and not pinned and bool(distinct_pids)
+    no_pin_ambiguous = profile_id is None and len(distinct_pids) > 1
+    if wrong_pin or no_pin_ambiguous:
+        seen: set[int] = set()
+        candidates = []
+        for (j, b, p) in all_matches:
+            if p.id in seen:
+                continue
+            seen.add(p.id)
+            candidates.append({
+                "profile_id": p.id,
+                "profile_name": p.name,
+                "job_id": j.id,
+                "status": j.status,
+                "has_tailored": j.status == STATUS_DONE and bool(j.docx_filename),
+            })
+        return {"matched": True, "ambiguous": True, "wrong_pin": wrong_pin, "candidates": candidates, "base": None}
+
+    matches = pinned
+    row = matches[0] if matches else None
 
     # Always include the main-profile base-resume info so the widget can
     # fall back when no tailored resume exists yet.
