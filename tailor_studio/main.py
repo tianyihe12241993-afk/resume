@@ -180,6 +180,7 @@ def _startup() -> None:
             logging.getLogger("tailor_studio.startup").info(
                 "Re-queued %d orphaned tailoring jobs from previous process", n,
             )
+        pipeline.start_watchdog()
     except Exception:
         import logging, traceback
         logging.getLogger("tailor_studio.startup").warning(

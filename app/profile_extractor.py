@@ -22,6 +22,7 @@ from typing import Optional
 from anthropic import Anthropic
 
 from . import config
+from .llm import make_client
 
 
 # Bump this when the extraction prompt changes — old caches become invalid.
@@ -116,7 +117,7 @@ _mem_cache: dict[str, dict] = {}
 def _client() -> Anthropic:
     if not config.ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
-    return Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    return make_client()
 
 
 def _extract_json(text: str) -> dict:

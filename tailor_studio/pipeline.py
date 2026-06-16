@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -149,7 +150,16 @@ def _resolve_jd(ju: JobUrl) -> tuple[str, str, str, str, Optional[str]]:
     )
 
 
+# job_id -> monotonic time the worker started it. Lets the watchdog tell a
+# genuinely-held job (live worker) from an orphan (no worker), and detect one
+# held implausibly long.
+_inflight: dict[int, float] = {}
+_inflight_lock = threading.Lock()
+
+
 def _run_single(job_url_id: int) -> None:
+    with _inflight_lock:
+        _inflight[job_url_id] = time.monotonic()
     db = SessionLocal()
     try:
         ju = db.get(JobUrl, job_url_id)
@@ -213,6 +223,19 @@ def _run_single(job_url_id: int) -> None:
         ju.status = STATUS_ANALYZING
         db.commit()
         spec = analyze_jd(jd_text, title=ju.title or "", company=ju.company or "")
+        # Guard: a page that scraped >200 chars but yields almost no real
+        # requirements isn't a usable JD (login wall, JS shell, cookie banner,
+        # generic landing page). Tailoring against it produces a meaningless
+        # ~0% coverage "done". Flag it for manual JD instead.
+        if len(spec.get("hard_skills") or []) < 3:
+            ju.status = STATUS_NEEDS_JD
+            ju.fail_reason = "empty_jd"
+            ju.error_message = (
+                "The page didn't contain a usable job description (no real "
+                "skills/requirements found). Open it and paste the JD manually."
+            )
+            db.commit()
+            return
         resume_struct = parse_resume_from_path(src_docx)
         cmap_base = build_coverage_map(spec, resume_struct)
         # LLM adjacency is always run here — it feeds the skills allowlist, so
@@ -382,6 +405,8 @@ def _run_single(job_url_id: int) -> None:
             pass
     finally:
         db.close()
+        with _inflight_lock:
+            _inflight.pop(job_url_id, None)
 
 
 _executor: Optional[ThreadPoolExecutor] = None
@@ -432,3 +457,69 @@ def requeue_orphans() -> int:
         return len(ids)
     finally:
         db.close()
+
+
+# How long a job may sit in an in-flight status before the watchdog reclaims it.
+_WATCHDOG_INTERVAL = int(os.getenv("STUDIO_WATCHDOG_INTERVAL", "120"))   # seconds
+_WATCHDOG_STUCK_AFTER = int(os.getenv("STUDIO_WATCHDOG_STUCK_AFTER", "900"))  # 15 min
+
+
+def _watchdog_once() -> int:
+    """Reclaim jobs wedged in an in-flight status. Two cases:
+      • No live worker holds it (not in `_inflight`) — an orphan (worker died,
+        or status set but never picked up). Always safe to requeue.
+      • A live worker has held it longer than _WATCHDOG_STUCK_AFTER — genuinely
+        stuck (should be rare now that calls time out). Requeue so progress
+        resumes; the stale worker's late result is harmless (the row is moving).
+    Returns the number reclaimed."""
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(JobUrl)
+            .filter(JobUrl.status.in_([
+                STATUS_FETCHING, STATUS_ANALYZING, STATUS_TAILORING,
+            ]))
+            .all()
+        )
+        now = time.monotonic()
+        reclaim: list[int] = []
+        with _inflight_lock:
+            for ju in rows:
+                started = _inflight.get(ju.id)
+                if started is None or (now - started) > _WATCHDOG_STUCK_AFTER:
+                    reclaim.append(ju.id)
+                    _inflight.pop(ju.id, None)
+        for ju in rows:
+            if ju.id in reclaim:
+                ju.status = STATUS_PENDING
+                ju.error_message = None
+        if reclaim:
+            db.commit()
+            for jid in reclaim:
+                enqueue(jid)
+        return len(reclaim)
+    finally:
+        db.close()
+
+
+_watchdog_started = False
+
+
+def start_watchdog() -> None:
+    """Launch the background watchdog loop (idempotent)."""
+    global _watchdog_started
+    if _watchdog_started:
+        return
+    _watchdog_started = True
+
+    def _loop():
+        while True:
+            time.sleep(_WATCHDOG_INTERVAL)
+            try:
+                n = _watchdog_once()
+                if n:
+                    print(f"[watchdog] reclaimed {n} stuck job(s)")
+            except Exception:
+                traceback.print_exc()
+
+    threading.Thread(target=_loop, name="studio-watchdog", daemon=True).start()

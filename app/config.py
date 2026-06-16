@@ -33,6 +33,16 @@ MAX_URLS_PER_BATCH = int(os.getenv("MAX_URLS_PER_BATCH", "200"))
 FRONTEND_URL = os.getenv("FRONTEND_URL", APP_BASE_URL).rstrip("/")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+# Per-request timeout (seconds) + retry cap for ALL Claude calls. The SDK
+# default is 600s, so a hung connection under heavy concurrency can jam a worker
+# for ~30 min. A tight timeout makes a stalled call fail fast and the job moves
+# on (degraded) instead of blocking the whole queue.
+ANTHROPIC_TIMEOUT = float(os.getenv("ANTHROPIC_TIMEOUT", "90"))
+ANTHROPIC_MAX_RETRIES = int(os.getenv("ANTHROPIC_MAX_RETRIES", "2"))
+# Global cap on simultaneous in-flight Claude calls across the WHOLE process
+# (all jobs, all fan-out). Decouples API load from STUDIO_WORKERS so a big batch
+# can't overwhelm your Anthropic rate limit (which causes 429 backoff + stalls).
+ANTHROPIC_MAX_CONCURRENCY = int(os.getenv("ANTHROPIC_MAX_CONCURRENCY", "12"))
 TAILOR_MODEL = os.getenv("TAILOR_MODEL", "claude-sonnet-4-6")
 EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "claude-haiku-4-5-20251001")
 # Defensibility / judgment calls (adjacency bridges, truthful skills-rewrite).

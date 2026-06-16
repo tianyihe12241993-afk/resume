@@ -25,6 +25,7 @@ from typing import Optional
 from anthropic import Anthropic
 
 from . import config
+from .llm import make_client
 from .tailoring import ResumeStruct
 
 
@@ -92,7 +93,7 @@ def _client() -> Anthropic:
     if _client_singleton is None:
         if not config.ANTHROPIC_API_KEY:
             raise RuntimeError("ANTHROPIC_API_KEY is not set. Edit .env and restart the server.")
-        _client_singleton = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        _client_singleton = make_client()
     return _client_singleton
 
 

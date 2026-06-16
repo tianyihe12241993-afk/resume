@@ -26,6 +26,7 @@ from typing import Optional
 from anthropic import Anthropic
 
 from . import config
+from .llm import make_client
 from .bullet_validator import apply_to_bullets
 from .tailoring import ResumeStruct
 
@@ -174,7 +175,7 @@ def _client() -> Anthropic:
             raise RuntimeError(
                 "ANTHROPIC_API_KEY is not set. Edit .env and restart the server."
             )
-        _client_singleton = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        _client_singleton = make_client()
     return _client_singleton
 
 

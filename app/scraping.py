@@ -11,6 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .work_type import classify_work_type, normalize_work_type
+from .llm import make_client
 
 
 def _finalize(info: Optional[dict]) -> Optional[dict]:
@@ -576,7 +577,7 @@ def _haiku_extract_from_html(html: str, url: str) -> Optional[dict]:
         from anthropic import Anthropic
         if not config.ANTHROPIC_API_KEY:
             return None
-        client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        client = make_client()
         prompt = (
             "Extract a job posting from this raw HTML. The content may be in a "
             "script tag with embedded JSON, a JSON-LD block, hidden meta tags, "

@@ -17,6 +17,7 @@ from typing import Optional
 from anthropic import Anthropic
 
 from . import config
+from .llm import make_client
 
 
 _JD_ANALYZER_SYSTEM = """You analyze a job description and emit a structured keyword spec used by a resume-tailoring system. The spec drives ATS keyword matching, so precision matters more than coverage — a few high-confidence terms beat many noisy ones.
@@ -96,7 +97,7 @@ def _client() -> Anthropic:
             raise RuntimeError(
                 "ANTHROPIC_API_KEY is not set. Edit .env and restart the server."
             )
-        _client_singleton = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        _client_singleton = make_client()
     return _client_singleton
 
 

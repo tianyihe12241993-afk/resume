@@ -14,6 +14,7 @@ from docx import Document
 from docx.oxml.ns import qn
 
 from . import config
+from .llm import make_client
 
 # --------------------------------------------------------------------------
 # Resume structure
@@ -501,7 +502,7 @@ def _client() -> Anthropic:
         raise RuntimeError(
             "ANTHROPIC_API_KEY is not set. Edit .env and restart the server."
         )
-    return Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    return make_client()
 
 
 def _extract_tagged_json(text: str) -> dict:
