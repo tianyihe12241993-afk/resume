@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { Navigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, X, Shield, Clock } from 'lucide-react'
+import { Check, X, Shield, Clock, ChevronDown, FolderKanban } from 'lucide-react'
+import clsx from 'clsx'
 import { api } from '@/lib/api'
 import { Avatar } from '@/components/charts'
 import { useAuth } from '@/hooks/useAuth'
@@ -86,33 +88,92 @@ export default function MembersPage() {
 
       {/* Approved members */}
       <div className="card p-5">
-        <h2 className="text-base font-semibold text-gray-900 mb-3">Members ({approved.length})</h2>
+        <h2 className="text-base font-semibold text-gray-900 mb-1">Members ({approved.length})</h2>
+        <p className="text-xs text-gray-400 mb-3">Click <span className="font-medium">Profiles</span> on a bidder to choose which profiles they can access.</p>
         <ul className="divide-y divide-slate-100 -mx-5">
           {approved.map((m) => (
-            <li key={m.id} className="px-5 py-3 flex items-center gap-3">
-              <Avatar name={m.name} size={32} />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-gray-900 truncate flex items-center gap-1.5">
-                  {m.name}
-                  {m.is_admin && (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-brand-700 bg-brand-50 border border-brand-200 rounded-full px-1.5 py-0.5">
-                      <Shield className="w-2.5 h-2.5" /> admin
-                    </span>
-                  )}
-                </p>
-                <p className="text-xs text-gray-400 truncate">{m.email} · joined {formatDateTime(m.created_at)}</p>
-              </div>
-              {!m.is_admin && (
-                <button onClick={() => { if (confirm(`Remove ${m.email}? This deletes their account.`)) reject.mutate(m.id) }}
-                        disabled={reject.isPending}
-                        className="text-gray-300 hover:text-red-600 transition" title="Remove member">
-                  <X className="w-4 h-4" />
-                </button>
-              )}
-            </li>
+            <MemberRow key={m.id} m={m}
+                       onRemove={() => { if (confirm(`Remove ${m.email}? This deletes their account.`)) reject.mutate(m.id) }}
+                       removing={reject.isPending} />
           ))}
         </ul>
       </div>
+    </div>
+  )
+}
+
+function MemberRow({ m, onRemove, removing }: { m: Member; onRemove: () => void; removing: boolean }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <li className="px-5 py-3">
+      <div className="flex items-center gap-3">
+        <Avatar name={m.name} size={32} />
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium text-gray-900 truncate flex items-center gap-1.5">
+            {m.name}
+            {m.is_admin && (
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-brand-700 bg-brand-50 border border-brand-200 rounded-full px-1.5 py-0.5">
+                <Shield className="w-2.5 h-2.5" /> admin
+              </span>
+            )}
+          </p>
+          <p className="text-xs text-gray-400 truncate">{m.email} · joined {formatDateTime(m.created_at)}</p>
+        </div>
+        {!m.is_admin && (
+          <>
+            <button onClick={() => setOpen((o) => !o)}
+                    className="btn-secondary text-xs py-1.5 px-3 inline-flex items-center gap-1">
+              <FolderKanban className="w-3.5 h-3.5" /> Profiles
+              <ChevronDown className={clsx('w-3.5 h-3.5 transition', open && 'rotate-180')} />
+            </button>
+            <button onClick={onRemove} disabled={removing}
+                    className="text-gray-300 hover:text-red-600 transition" title="Remove member">
+              <X className="w-4 h-4" />
+            </button>
+          </>
+        )}
+      </div>
+      {open && !m.is_admin && <ProfileToggles uid={m.id} />}
+    </li>
+  )
+}
+
+function ProfileToggles({ uid }: { uid: number }) {
+  const qc = useQueryClient()
+  const { data } = useQuery({
+    queryKey: ['admin/member-profiles', uid],
+    queryFn: () => api.get<{ profiles: { id: number; name: string; has_access: boolean }[] }>(
+      `/api/admin/members/${uid}/profiles`),
+  })
+  const setAccess = useMutation({
+    mutationFn: ({ pid, granted }: { pid: number; granted: boolean }) =>
+      api.post(`/api/admin/profiles/${pid}/access/${uid}`, { granted }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin/member-profiles', uid] })
+      qc.invalidateQueries({ queryKey: ['admin/profiles'] })
+    },
+  })
+  const profiles = data?.profiles ?? []
+  return (
+    <div className="mt-2 ml-11 border-l-2 border-slate-100 pl-3">
+      {profiles.length === 0 ? (
+        <p className="text-xs text-gray-400 py-1">No profiles yet — create one first.</p>
+      ) : (
+        <ul className="space-y-1.5 py-1">
+          {profiles.map((p) => (
+            <li key={p.id} className="flex items-center gap-2 text-sm">
+              <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                <input type="checkbox" className="sr-only peer" checked={p.has_access}
+                       disabled={setAccess.isPending}
+                       onChange={(e) => setAccess.mutate({ pid: p.id, granted: e.target.checked })} />
+                <div className="w-9 h-5 bg-slate-200 rounded-full peer peer-checked:bg-brand-600 transition" />
+                <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full transition peer-checked:translate-x-4" />
+              </label>
+              <span className="text-gray-700 truncate">{p.name}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

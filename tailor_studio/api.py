@@ -1612,6 +1612,20 @@ def api_member_reject(uid: int, db: Session = Depends(get_db), me=Depends(auth.r
     return {"ok": True}
 
 
+@router.get("/admin/members/{uid}/profiles")
+def api_member_profiles(uid: int, db: Session = Depends(get_db), me=Depends(auth.require_admin)):
+    """List the admin's profiles with whether this bidder is assigned to each.
+    Toggle via POST /admin/profiles/{pid}/access/{uid}."""
+    u = db.get(User, uid)
+    if u is None or u.is_admin:
+        raise HTTPException(404, "Not a bidder account.")
+    granted = {pid for (pid,) in db.query(ProfileAccess.profile_id).filter_by(user_id=uid).all()}
+    profs = db.query(Profile).filter_by(user_id=me.id).order_by(Profile.created_at.desc()).all()
+    return {"profiles": [
+        {"id": p.id, "name": p.name, "has_access": p.id in granted} for p in profs
+    ]}
+
+
 # ───────────────── job actions ─────────────────
 
 class ManualJDIn(BaseModel):
