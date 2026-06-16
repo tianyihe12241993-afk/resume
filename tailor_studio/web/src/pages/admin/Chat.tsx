@@ -44,6 +44,11 @@ function timeOf(iso: string | null): string {
   try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
   catch { return '' }
 }
+function typingText(t: { name: string }[]): string {
+  if (t.length === 1) return `${t[0].name} is typing`
+  if (t.length === 2) return `${t[0].name} and ${t[1].name} are typing`
+  return 'Several people are typing'
+}
 function dayOf(iso: string | null): string {
   if (!iso) return ''
   try { return new Date(iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }) }
@@ -69,6 +74,12 @@ export default function ChatPage() {
   // Admin multi-select / bulk delete
   const [selecting, setSelecting] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
+  // Typing indicator
+  const [typing, setTyping] = useState<{ id: number; name: string }[]>([])
+  const typingTimers = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map())
+  const lastTypingSent = useRef(0)
+  const meIdRef = useRef<number | null>(null)
+  meIdRef.current = meId
   const [online, setOnline] = useState(0)
   const [onlineNames, setOnlineNames] = useState<string[]>([])
   const [connected, setConnected] = useState(false)
@@ -152,6 +163,17 @@ export default function ChatPage() {
         else if (m.type === 'clear') {
           setMessages([]); setPinned([])
         }
+        else if (m.type === 'typing') {
+          if (m.user_id === meIdRef.current) return     // ignore my own typing
+          const id = m.user_id, name = m.name
+          setTyping((prev) => prev.some((t) => t.id === id) ? prev : [...prev, { id, name }])
+          const timers = typingTimers.current
+          if (timers.has(id)) clearTimeout(timers.get(id)!)
+          timers.set(id, setTimeout(() => {
+            setTyping((prev) => prev.filter((t) => t.id !== id))
+            timers.delete(id)
+          }, 3500))
+        }
         else if (m.type === 'pin') {
           setMessages((prev) => prev.map((x) => x.id === m.id ? { ...x, pinned: m.pinned } : x))
           setPinned((prev) => {
@@ -170,6 +192,7 @@ export default function ChatPage() {
   }, [])
 
   useEffect(() => { scrollToBottom() }, [messages, scrollToBottom])
+  useEffect(() => () => { typingTimers.current.forEach(clearTimeout); typingTimers.current.clear() }, [])
 
   // Mention candidates: every member + a synthetic "all".
   const candidates = (() => {
@@ -184,6 +207,12 @@ export default function ChatPage() {
     setText(v)
     const m = activeMention(v, e.target.selectionStart ?? v.length)
     setMention(m); setMhi(0)
+    // Throttle "typing" pings to ~once every 1.8s while there's text.
+    const now = Date.now()
+    if (v.trim() && !editing && now - lastTypingSent.current > 1800) {
+      lastTypingSent.current = now
+      wsSend({ action: 'typing' })
+    }
   }
 
   const insertMention = (name: string) => {
@@ -450,8 +479,22 @@ export default function ChatPage() {
         })}
       </div>
 
+      {/* Typing indicator */}
+      <div className="h-5 px-2 mt-1 flex items-center gap-1.5 text-xs text-gray-400">
+        {typing.length > 0 && (
+          <>
+            <span className="flex gap-0.5 items-end">
+              <span className="w-1 h-1 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+              <span className="w-1 h-1 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+              <span className="w-1 h-1 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+            </span>
+            <span>{typingText(typing)}</span>
+          </>
+        )}
+      </div>
+
       {/* Composer */}
-      <div className="mt-3 relative">
+      <div className="relative">
         {/* Mention autocomplete */}
         {mention && candidates.length > 0 && (
           <div className="absolute bottom-full mb-1 left-0 w-64 bg-white border border-slate-200 rounded-lg shadow-lg overflow-hidden z-10">

@@ -90,6 +90,11 @@ async def chat_ws(websocket: WebSocket):
                     await chat.manager.broadcast({"type": "delete", "id": mid})
                 continue
 
+            # ── typing indicator (ephemeral, relayed) ───────────────────
+            if action == "typing":
+                await chat.manager.broadcast({"type": "typing", "user_id": uid, "name": name})
+                continue
+
             # ── bulk delete (admin only) ────────────────────────────────
             if action == "delete_many":
                 ids = [int(i) for i in (data.get("ids") or []) if isinstance(i, int)][:500]
