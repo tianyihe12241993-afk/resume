@@ -1,6 +1,7 @@
 """Resume parsing + Claude-powered tailoring + docx writing."""
 from __future__ import annotations
 
+import copy as _copy
 import hashlib
 import json
 import re
@@ -10,6 +11,7 @@ from typing import Optional
 
 from anthropic import Anthropic
 from docx import Document
+from docx.oxml.ns import qn
 
 from . import config
 
@@ -333,22 +335,161 @@ def set_paragraph_text(p, new_text: str) -> None:
                     r._element.getparent().remove(r._element)
             return
 
-    # Fallback. If the original used selective bold for emphasis (some runs
-    # bold, some plain) the whole paragraph is conceptually plain with bold
-    # accents — emphasis can't survive a rewrite, so default to plain. Only
-    # uniformly-bold paragraphs stay bold.
+    # Uniformly-bold paragraph → keep it bold.
     text_runs = [r for r in runs if (r.text or "").strip()]
     if text_runs and all(bool(r.bold) for r in text_runs):
         keep = max(text_runs, key=lambda r: len(r.text or ""))
         keep.bold = True
-    else:
-        plain_candidates = [r for r in runs if not bool(r.bold)]
-        keep = max(plain_candidates or runs, key=lambda r: len(r.text or ""))
-        keep.bold = False
-    keep.text = new_text
+        keep.text = new_text
+        for r in runs:
+            if r is not keep:
+                r._element.getparent().remove(r._element)
+        return
+
+    # Mixed emphasis (some runs bold, some plain). Use the dominant plain run as
+    # the base formatting, then re-bold any originally-bold word that survived
+    # verbatim into the rewrite — so emphasis on terms the rewriter kept (e.g. a
+    # bolded "Kubernetes") is restored rather than flattened.
+    bold_subs = [
+        (r.text or "").strip()
+        for r in runs
+        if bool(r.bold) and (r.text or "").strip()
+    ]
+    plain_candidates = [r for r in runs if not bool(r.bold)]
+    keep = max(plain_candidates or runs, key=lambda r: len(r.text or ""))
     for r in runs:
         if r is not keep:
             r._element.getparent().remove(r._element)
+    keep.bold = False
+
+    segments = _bold_segments(new_text, bold_subs)
+    if not segments:
+        keep.text = new_text
+        return
+    _rebuild_run_with_bold(p, keep, segments)
+
+
+def _bold_segments(new_text: str, bold_subs: list[str]) -> Optional[list[tuple[str, bool]]]:
+    """Split `new_text` into (text, is_bold) segments by marking every verbatim
+    occurrence of an originally-bold substring as bold. Returns None when no
+    bold substring survives (caller then writes plain text)."""
+    n = len(new_text)
+    if not n:
+        return None
+    mask = [False] * n
+    # Longer substrings first so a phrase wins over an incidental short word.
+    subs = sorted(
+        {s for s in bold_subs if len(s) >= 2 and any(ch.isalnum() for ch in s)},
+        key=len, reverse=True,
+    )
+    any_bold = False
+    for s in subs:
+        start = 0
+        while True:
+            i = new_text.find(s, start)
+            if i < 0:
+                break
+            for k in range(i, i + len(s)):
+                mask[k] = True
+            any_bold = True
+            start = i + len(s)
+    if not any_bold:
+        return None
+
+    segments: list[tuple[str, bool]] = []
+    cur = mask[0]
+    buf = new_text[0]
+    for idx in range(1, n):
+        if mask[idx] == cur:
+            buf += new_text[idx]
+        else:
+            segments.append((buf, cur))
+            buf = new_text[idx]
+            cur = mask[idx]
+    segments.append((buf, cur))
+    return segments
+
+
+def _set_run_rpr(run, rpr_clone) -> None:
+    """Replace a run's properties with a clone of another run's rPr (font, size,
+    color, etc.), so a freshly-added run inherits the source run's look."""
+    el = run._element
+    existing = el.find(qn("w:rPr"))
+    if existing is not None:
+        el.remove(existing)
+    if rpr_clone is not None:
+        el.insert(0, _copy.deepcopy(rpr_clone))
+
+
+def _split_skill(category: str, items: str) -> tuple[str, str]:
+    """Return (label, body) for a skill row. Handles both shapes the pipeline
+    produces: clean separate fields (tailor_skills) and the full "Label: body"
+    line duplicated into both fields (deterministic fallback / single-paragraph
+    parse)."""
+    category = (category or "").strip()
+    items = (items or "").strip()
+    if items and category and items != category and not items.startswith(category):
+        return category.rstrip(":").strip(), items
+    full = items or category
+    if ":" in full:
+        label, _, body = full.partition(":")
+        return label.strip(), body.strip()
+    return full.strip(), ""
+
+
+def _apply_skill_row(p, category: str, items: str) -> None:
+    """Write a skill row into a single paragraph as a bold 'Label:' followed by
+    plain items, cloning the original bold/plain run formatting so fonts, sizes
+    and colors survive. Used when the resume keeps category + items in ONE
+    paragraph (category_idx == items_idx); writing them with two separate
+    set_paragraph_text calls would make the second clobber the first."""
+    label, body = _split_skill(category, items)
+    runs = list(p.runs)
+    bold_rpr = plain_rpr = None
+    for r in runs:
+        if not (r.text or "").strip():
+            continue
+        if r.bold and bold_rpr is None:
+            bold_rpr = r._element.find(qn("w:rPr"))
+        elif not r.bold and plain_rpr is None:
+            plain_rpr = r._element.find(qn("w:rPr"))
+    if bold_rpr is None:
+        bold_rpr = plain_rpr
+    if plain_rpr is None:
+        plain_rpr = bold_rpr
+    bold_clone = _copy.deepcopy(bold_rpr) if bold_rpr is not None else None
+    plain_clone = _copy.deepcopy(plain_rpr) if plain_rpr is not None else None
+
+    for r in runs:
+        r._element.getparent().remove(r._element)
+
+    label_run = p.add_run(label + (":" if body else ""))
+    _set_run_rpr(label_run, bold_clone)
+    label_run.bold = True
+    if body:
+        body_run = p.add_run(" " + body)
+        _set_run_rpr(body_run, plain_clone)
+        body_run.bold = False
+
+
+def _rebuild_run_with_bold(p, keep, segments: list[tuple[str, bool]]) -> None:
+    """Rewrite paragraph `p` as `segments`, cloning `keep`'s run properties
+    (font, size, color) onto each new run so only bold differs between them."""
+    rpr = keep._element.find(qn("w:rPr"))
+    rpr_clone = _copy.deepcopy(rpr) if rpr is not None else None
+
+    first_text, first_bold = segments[0]
+    keep.text = first_text
+    keep.bold = first_bold
+    for text, is_bold in segments[1:]:
+        r = p.add_run(text)  # keep is the only existing run, so this appends after it
+        el = r._element
+        existing = el.find(qn("w:rPr"))
+        if existing is not None:
+            el.remove(existing)
+        if rpr_clone is not None:
+            el.insert(0, _copy.deepcopy(rpr_clone))
+        r.bold = is_bold
 
 
 # --------------------------------------------------------------------------
@@ -520,6 +661,9 @@ XML RULES:
 _TAILOR_CACHE_DIR = config.DATA_DIR / "tailor_cache"
 _tailor_mem_cache: dict[str, dict] = {}
 
+_SKILLS_CACHE_DIR = config.DATA_DIR / "skills_cache"
+_skills_mem_cache: dict[str, list] = {}
+
 
 def tailor_resume(
     resume: ResumeStruct, job: dict, *, system_prompt: Optional[str] = None
@@ -623,6 +767,104 @@ def tailor_resume(
         pass
 
     return out
+
+
+SKILLS_SYSTEM = """You rewrite the SKILLS section of a resume to align with a target job posting, for ATS keyword matching. Be aggressive about surfacing relevant skills — but only ones the candidate actually has.
+
+You are given:
+- The candidate's current skills as numbered rows, each "Category: item, item, ...".
+- The JD's prioritized skills (most important first).
+- An ALLOWED list — the ONLY skills you may ADD (the candidate has exact or adjacent/transferable evidence for these).
+
+RULES — any violation invalidates the output:
+1. Output EXACTLY the same number of rows as the input.
+2. You may ADD a skill only if it is in the ALLOWED list. NEVER add a skill that is not in the ALLOWED list, even if the JD wants it.
+3. Never remove a skill the candidate already listed. No duplicates within a row.
+4. Place each added skill in the most fitting row.
+5. Reorder the rows so the most JD-relevant categories come first; within each row, lead with the most JD-relevant items.
+6. Canonicalize names to the JD's spelling (write "Kubernetes" if the JD says Kubernetes and the resume said "k8s").
+7. You MAY rename a category label to clearer / JD-aligned wording, as long as it stays truthful to the row's contents.
+
+OUTPUT — emit STRICT JSON inside <json>...</json> tags, nothing else:
+{"rows": [{"category": "Languages", "items": "Python, Go, ..."}, ...]}
+Exactly the same number of rows as the input, in your chosen order."""
+
+
+def tailor_skills(
+    skill_rows: list[tuple[str, str]],
+    jd_terms: list[str],
+    allowed_terms: list[str],
+) -> Optional[list[tuple[str, str]]]:
+    """LLM-rewrite the skills section: reorder + canonicalize + add allowed JD
+    skills into the best-fitting existing rows. Returns the rewritten rows (same
+    count) or None on failure / invalid output (caller falls back)."""
+    rows = [(str(c or "").strip(), str(i or "").strip()) for c, i in skill_rows]
+    if not rows:
+        return None
+    n = len(rows)
+    rows_txt = "\n".join(f"{idx + 1}. {c}: {it}" for idx, (c, it) in enumerate(rows))
+    user = (
+        f"CURRENT SKILLS ({n} rows):\n{rows_txt}\n\n"
+        f"JD PRIORITY SKILLS:\n{', '.join(jd_terms[:50])}\n\n"
+        f"ALLOWED TO ADD (only these):\n{', '.join(allowed_terms[:80]) or '(none)'}\n\n"
+        f"Return JSON with exactly {n} rows."
+    )
+
+    # Disk + mem cache keyed on the full input. Inputs are deterministic for a
+    # given (profile, JD), so a repeated tailoring of the same pair is free.
+    cache_blob = json.dumps(
+        {"model": config.JUDGE_MODEL, "system": SKILLS_SYSTEM, "user": user},
+        ensure_ascii=False, sort_keys=True,
+    )
+    cache_key = hashlib.sha256(cache_blob.encode("utf-8")).hexdigest()
+    cached = _skills_mem_cache.get(cache_key)
+    if cached is None:
+        cache_path = _SKILLS_CACHE_DIR / f"{cache_key}.json"
+        if cache_path.exists():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                _skills_mem_cache[cache_key] = cached
+            except (OSError, json.JSONDecodeError):
+                cached = None
+    if cached is not None:
+        # Stored as list[[cat, items]]; return as list[tuple].
+        return [tuple(r) for r in cached] if cached else None
+
+    try:
+        resp = _client().messages.create(
+            model=config.JUDGE_MODEL,
+            max_tokens=1500,
+            temperature=0,
+            system=SKILLS_SYSTEM,
+            messages=[{"role": "user", "content": user}],
+        )
+        txt = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+        data = _extract_tagged_json(txt)
+        out_rows = data.get("rows") if isinstance(data, dict) else None
+        if not isinstance(out_rows, list):
+            return None
+        out = [
+            (str(r.get("category", "")).strip(), str(r.get("items", "")).strip())
+            for r in out_rows if isinstance(r, dict)
+        ]
+        out = [r for r in out if r[0] or r[1]]
+        # Must preserve the row count so apply_tailoring maps content to the same
+        # docx paragraph slots.
+        if len(out) != n:
+            return None
+        # Persist (best-effort) so repeated runs of this (profile, JD) skip the call.
+        try:
+            _SKILLS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            _SKILLS_CACHE_DIR.joinpath(f"{cache_key}.json").write_text(
+                json.dumps([list(r) for r in out], ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        _skills_mem_cache[cache_key] = [list(r) for r in out]
+        return out
+    except Exception:
+        return None
 
 
 def _xml_escape(s: str) -> str:
@@ -798,8 +1040,13 @@ def apply_tailoring(
             tailored.get("skill_categories", []),
             tailored.get("skill_items", []),
         ):
-            set_paragraph_text(paras[skill.category_idx], cat.strip())
-            set_paragraph_text(paras[skill.items_idx], items.strip())
+            if skill.category_idx == skill.items_idx:
+                # Category + items share one paragraph — write them together
+                # (bold label + plain items) so neither clobbers the other.
+                _apply_skill_row(paras[skill.category_idx], cat, items)
+            else:
+                set_paragraph_text(paras[skill.category_idx], cat.strip())
+                set_paragraph_text(paras[skill.items_idx], items.strip())
 
     dst_docx.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(dst_docx))

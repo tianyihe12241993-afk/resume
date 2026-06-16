@@ -157,6 +157,34 @@ def _make_pattern(term: str) -> re.Pattern:
     )
 
 
+# Cloud-vendor prefixes that JDs attach to otherwise-generic service names.
+# A JD writes "Amazon SageMaker" / "AWS Lambda" / "Azure OpenAI"; resumes
+# usually list the bare service ("SageMaker", "Lambda"). Treat the stripped
+# form as an alias so the match isn't lost to vendor branding.
+_VENDOR_PREFIXES = (
+    "amazon web services", "amazon", "aws", "google cloud platform",
+    "google cloud", "google", "gcp", "microsoft azure", "azure",
+    "microsoft", "oracle cloud", "oracle", "ibm",
+)
+
+
+def _auto_aliases(term: str) -> list[str]:
+    """Generate safe synonym variants for a JD term so verbatim matching is
+    resilient to vendor branding. Currently: strip a leading cloud-vendor
+    prefix (e.g. 'Amazon SageMaker' -> 'SageMaker'). Only strips when a real
+    service name remains, so 'Amazon'/'AWS' alone never collapse to nothing."""
+    t = term.strip()
+    low = t.lower()
+    out: list[str] = []
+    for pref in _VENDOR_PREFIXES:
+        if low.startswith(pref + " "):
+            rest = t[len(pref):].strip()
+            if len(rest) >= 3:  # keep only meaningful remainders
+                out.append(rest)
+            break
+    return out
+
+
 def _find_evidence(term: str, resume: ResumeStruct) -> list[dict]:
     """Return every place in the resume where `term` appears verbatim."""
     pat = _make_pattern(term)
@@ -234,7 +262,8 @@ def build_coverage_map(spec: dict, resume: ResumeStruct) -> dict:
         if not term:
             continue
         weight = float(skill.get("weight") or 0.0)
-        aliases = skill.get("aliases") or []
+        # JD-supplied aliases plus auto-generated vendor-stripped variants.
+        aliases = list(skill.get("aliases") or []) + _auto_aliases(term)
 
         evidence = _find_evidence(term, resume)
         for alias in aliases:

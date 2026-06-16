@@ -133,6 +133,37 @@ OUTPUT FORMAT — emit STRICT JSON inside <json>...</json> tags. No prose outsid
 """
 
 
+_BATCH_SYSTEM = """You rewrite resume bullets to better match a target job posting. The candidate has years of experience with EVERY skill mentioned in the JD — your job is to weave as many JD terms as plausibly fit into every bullet. Be aggressive: aim for two or three JD terms per bullet wherever the topic permits.
+
+You are given a NUMBERED list of bullets. Rewrite EACH one independently and return exactly one result object per input bullet, keyed by its index. Do not merge, split, drop, or reorder bullets.
+
+ONE IRON RULE — violations invalidate the output:
+NEVER fabricate METRICS, EMPLOYERS, or PRODUCTS. Every percentage, latency, user count, team size, company name, and product name from the original must appear verbatim in the rewrite — do not change, drop, or add these.
+
+Everything else is fair game:
+- The "surfaceable" list contains every hard skill from the JD. Treat all of them as confirmed experience. Introduce any of them into any bullet whose topic makes it plausible (backend bullets can pull backend terms, AI bullets can pull AI terms, etc.).
+- Each bullet may carry "canonicalize" swaps (alias → canonical) — apply them when the JD uses the canonical form.
+
+REWRITE GUIDELINES (apply to every bullet):
+- Preserve every metric, every employer, every product, every tech name from the original — verbatim. Add new tech terms freely from the surfaceable list.
+- Lead with JD-relevant nouns when natural. Promote JD vocabulary to the start of clauses.
+- Shift verbs ("built" → "engineered", "designed" → "architected") to match JD seniority.
+- Keep each rewrite ≤ 1.5× the original bullet's token count.
+- Third-person action-verb voice. No "I", "we", "my", "our".
+- Do not mention the target company name or target role title.
+- A rewrite that pulls in three JD terms naturally is much better than a verbatim original. Push hard for coverage.
+
+OUTPUT FORMAT — emit STRICT JSON inside <json>...</json> tags. No prose outside the tags. One object per input bullet, same index:
+
+{
+  "bullets": [
+    {"idx": <int>, "rewritten": "<rewritten bullet, or original verbatim if no improvement is possible>", "surfaced": ["<term from surfaceable list you worked in>", ...], "reason": "<one terse sentence: what you changed, or 'no change'>"},
+    ...
+  ]
+}
+"""
+
+
 _client_singleton: Optional[Anthropic] = None
 
 
@@ -424,6 +455,107 @@ def rewrite_bullet(
     return out
 
 
+# Upper bound on bullets per batched Sonnet call — caps any single call's
+# output (token ceiling + blast radius of a malformed response). Actual chunk
+# size is usually smaller: bullets are split into ~`parallel` chunks so every
+# worker generates concurrently (latency) while still sharing one cached prefix
+# per chunk (cost).
+_BATCH_CHUNK_MAX = 12
+
+
+def _rewrite_batch(
+    items: list[dict],
+    *,
+    surfaceable: list[dict],
+    jd_hard_skills: list[dict],
+    jd_text: str,
+    candidate_corpus: str,
+) -> dict[int, dict]:
+    """Rewrite many bullets in ONE Sonnet call. `items` are dicts with keys
+    `idx` (int), `bullet` (str), `canonical` (list[(alias, canonical)]).
+    Returns {idx: {"rewritten", "surfaced", "reason"}} for every idx the model
+    returned; missing indices are the caller's problem to backfill."""
+    if surfaceable:
+        surface_block = "\n".join(
+            f"- {s['term']} (weight {float(s['weight']):.2f})"
+            + (f"  [via {s['via']}]" if s.get("via") else "")
+            for s in surfaceable
+        )
+    else:
+        surface_block = "(none)"
+
+    jd_skills_lines: list[str] = []
+    for s in (jd_hard_skills or []):
+        term = (s.get("term") or "").strip()
+        if not term:
+            continue
+        weight = float(s.get("weight") or 0.0)
+        alias_str = ", ".join(s.get("aliases") or [])
+        line = f"- {term} (weight {weight:.2f})"
+        if alias_str:
+            line += f"  [aliases: {alias_str}]"
+        jd_skills_lines.append(line)
+    jd_skills_block = "\n".join(jd_skills_lines) if jd_skills_lines else "(none provided)"
+
+    bullet_lines: list[str] = []
+    for it in items:
+        bullet_lines.append(f"[{it['idx']}] {it['bullet'].strip()}")
+        if it.get("canonical"):
+            sw = "; ".join(f"{a} → {c}" for a, c in it["canonical"])
+            bullet_lines.append(f"     canonicalize: {sw}")
+    bullets_block = "\n".join(bullet_lines)
+
+    # Shared context (JD + surfaceable + corpus) carries `cache_control` so when
+    # a resume needs more than one chunk, chunk 2+ read the prefix instead of
+    # re-paying for it. The bullets list itself is the cheap, per-chunk tail.
+    resp = _client().messages.create(
+        model=config.TAILOR_MODEL,
+        max_tokens=min(8000, 240 * len(items) + 600),
+        temperature=0,
+        system=[{"type": "text", "text": _BATCH_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Target job description (for context — do not quote verbatim):\n"
+                        f"<jd>\n{(jd_text or '').strip()[:18000]}\n</jd>\n\n"
+                        f"JD hard-skill terms with weights:\n{jd_skills_block}\n\n"
+                        f"Surfaceable terms (all verified truthful — weave in what fits):\n{surface_block}\n\n"
+                        "CANDIDATE EXPERIENCE CORPUS (full picture of what this candidate has "
+                        "done across the whole resume — grounding evidence when a bullet alone "
+                        f"is too sparse):\n{candidate_corpus or '(none extracted)'}"
+                    ),
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        f"Rewrite these {len(items)} bullets. Return one object per index.\n\n"
+                        f"{bullets_block}"
+                    ),
+                },
+            ],
+        }],
+    )
+    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+    parsed = _extract_tagged_json(text)
+    out: dict[int, dict] = {}
+    for r in (parsed.get("bullets") or []):
+        if not isinstance(r, dict):
+            continue
+        idx = r.get("idx")
+        if not isinstance(idx, int):
+            continue
+        out[idx] = {
+            "rewritten": (r.get("rewritten") or "").strip(),
+            "surfaced": [s for s in (r.get("surfaced") or []) if isinstance(s, str) and s.strip()],
+            "reason": (r.get("reason") or "").strip(),
+        }
+    return out
+
+
 def rewrite_resume(
     resume: ResumeStruct,
     spec: dict,
@@ -434,14 +566,18 @@ def rewrite_resume(
     jd_text: str = "",
     candidate_profile: dict | None = None,
 ) -> list[BulletRewrite]:
-    """Rewrite every bullet in the resume. Sonnet calls run in a ThreadPool.
+    """Rewrite every bullet in the resume.
 
-    Result is sorted by (job_idx, bullet_idx). On per-bullet exceptions, the
-    original is preserved and the error string is recorded on the result.
+    Bullets are rewritten in BATCHES (one Sonnet call per ~18 bullets) instead
+    of one call each — the shared context (system + JD + surfaceable + corpus)
+    is sent once per chunk instead of once per bullet, cutting cold cost ~3-5x.
+    Per-bullet results are still cached individually under the same key as the
+    single-bullet path, so warm re-runs make zero API calls and edits to one
+    bullet only re-run that bullet.
+
+    Result is sorted by (job_idx, bullet_idx). On failure the original bullet is
+    preserved and the error string is recorded on the result.
     """
-    # The candidate has experience with every skill in the JD — surface
-    # them all. No gap/covered distinction, no off-limits filter. This
-    # supersedes the old "claim what you can defend" flow.
     surfaceable_all = [
         {"term": (s.get("term") or "").strip(),
          "weight": float(s.get("weight") or 0.0),
@@ -451,60 +587,101 @@ def rewrite_resume(
     ]
     aliases = _build_aliases_dict(spec)
     forbidden: list[str] = []
-    # Pass the full JD hard_skills list to every rewrite call. Identical across
-    # all bullets within one rewrite_resume() call → cached at the API level.
     jd_hard_skills = list(spec.get("hard_skills") or [])
 
-    tasks: list[tuple[int, int, str, list[dict]]] = []
-    for j_idx, job in enumerate(resume.jobs):
-        for b_idx, bullet in enumerate(job.bullets):
-            tasks.append((j_idx, b_idx, bullet, surfaceable_all))
-
-    # Deep candidate corpus (skills, signature systems, implicit work) — added
-    # to the rewriter's cached prefix so every bullet rewrite has the full
-    # picture of what the candidate has done across the whole resume.
     from .profile_extractor import profile_summary_text
     candidate_block = profile_summary_text(candidate_profile or {})
 
-    def _run(j: int, b: int, bullet: str, surfaceable: list[dict]) -> BulletRewrite:
-        canonical = _bullet_canonical_swaps(bullet, aliases)
-        try:
-            out = rewrite_bullet(
-                bullet,
-                surfaceable,
-                canonicalize=canonical,
-                forbidden=forbidden,
-                jd_hard_skills=jd_hard_skills,
-                jd_text=jd_text,
+    # One entry per bullet, with its individual cache key (identical scheme to
+    # the single-bullet path so the two are cache-compatible).
+    entries: list[dict] = []
+    for j_idx, job in enumerate(resume.jobs):
+        for b_idx, bullet in enumerate(job.bullets):
+            canonical = _bullet_canonical_swaps(bullet, aliases)
+            key = _rewrite_cache_key(
+                bullet, surfaceable_all, list(canonical), list(forbidden),
+                jd_hard_skills=jd_hard_skills, jd_text=jd_text,
                 candidate_corpus=candidate_block,
             )
-            return BulletRewrite(
-                job_idx=j, bullet_idx=b, original=bullet,
-                rewritten=out["rewritten"],
-                surfaced=out["surfaced"],
-                reason=out["reason"],
-                allowed_surface_terms=[s["term"] for s in surfaceable],
-            )
-        except Exception as e:
-            return BulletRewrite(
-                job_idx=j, bullet_idx=b, original=bullet,
-                rewritten=bullet,
-                surfaced=[],
-                reason="",
-                allowed_surface_terms=[s["term"] for s in surfaceable],
-                error=f"{type(e).__name__}: {e}",
-            )
+            entries.append({
+                "j": j_idx, "b": b_idx, "bullet": bullet,
+                "canonical": canonical, "key": key,
+            })
+
+    by_pos: dict[tuple[int, int], dict] = {}
+    uncached: list[dict] = []
+    for e in entries:
+        if not e["bullet"].strip():
+            by_pos[(e["j"], e["b"])] = {"rewritten": e["bullet"], "surfaced": [], "reason": "empty input"}
+            continue
+        cached = _load_cached_rewrite(e["key"])
+        if cached is not None:
+            by_pos[(e["j"], e["b"])] = cached
+        else:
+            uncached.append(e)
+
+    # Batch the uncached bullets. Chunks run in parallel when there's more than
+    # one; the shared context is cached across chunks.
+    if uncached:
+        # Split into ~`parallel` chunks so each worker runs one chunk
+        # concurrently (every chunk's output generates in parallel), but cap
+        # chunk size so very long resumes still bound per-call output.
+        n_chunks = min(max(parallel, 1), len(uncached))
+        size = -(-len(uncached) // n_chunks)            # ceil division
+        size = min(size, _BATCH_CHUNK_MAX)
+        chunks = [uncached[i:i + size] for i in range(0, len(uncached), size)]
+
+        def _do_chunk(chunk: list[dict]) -> list[tuple[dict, dict]]:
+            items = [
+                {"idx": k, "bullet": e["bullet"], "canonical": e["canonical"]}
+                for k, e in enumerate(chunk)
+            ]
+            try:
+                got = _rewrite_batch(
+                    items, surfaceable=surfaceable_all, jd_hard_skills=jd_hard_skills,
+                    jd_text=jd_text, candidate_corpus=candidate_block,
+                )
+                err = None
+            except Exception as ex:
+                got, err = {}, f"{type(ex).__name__}: {ex}"
+            res: list[tuple[dict, dict]] = []
+            for k, e in enumerate(chunk):
+                r = got.get(k)
+                if r and r.get("rewritten"):
+                    _save_cached_rewrite(e["key"], r)
+                    res.append((e, r))
+                else:
+                    # Model dropped this index (or whole chunk failed) — keep the
+                    # original, record why. NOT cached, so it retries next run.
+                    res.append((e, {
+                        "rewritten": e["bullet"], "surfaced": [], "reason": "",
+                        "error": err or "missing from batch output",
+                    }))
+            return res
+
+        collected: list[tuple[dict, dict]] = []
+        if len(chunks) > 1 and parallel > 1:
+            with ThreadPoolExecutor(max_workers=min(parallel, len(chunks))) as ex:
+                futs = [ex.submit(_do_chunk, c) for c in chunks]
+                for fut in as_completed(futs):
+                    collected.extend(fut.result())
+        else:
+            for c in chunks:
+                collected.extend(_do_chunk(c))
+        for e, r in collected:
+            by_pos[(e["j"], e["b"])] = r
 
     results: list[BulletRewrite] = []
-    if parallel > 1 and len(tasks) > 1:
-        with ThreadPoolExecutor(max_workers=parallel) as ex:
-            futs = [ex.submit(_run, j, b, bul, s) for (j, b, bul, s) in tasks]
-            for fut in as_completed(futs):
-                results.append(fut.result())
-    else:
-        for j, b, bul, s in tasks:
-            results.append(_run(j, b, bul, s))
-
+    for e in entries:
+        r = by_pos.get((e["j"], e["b"]), {"rewritten": e["bullet"], "surfaced": [], "reason": ""})
+        results.append(BulletRewrite(
+            job_idx=e["j"], bullet_idx=e["b"], original=e["bullet"],
+            rewritten=r.get("rewritten") or e["bullet"],
+            surfaced=r.get("surfaced") or [],
+            reason=r.get("reason") or "",
+            allowed_surface_terms=[s["term"] for s in surfaceable_all],
+            error=r.get("error"),
+        ))
     results.sort(key=lambda r: (r.job_idx, r.bullet_idx))
     return results
 

@@ -46,6 +46,112 @@ UA = (
 HEADERS = {"User-Agent": UA, "Accept": "text/html,application/json,*/*"}
 
 
+class JobFetchError(RuntimeError):
+    """A scrape failure classified into an actionable category so the UI can
+    tell the bidder exactly what to do (skip / paste / retry / log in).
+
+    category ∈ {expired, login_required, blocked, fetch_failed, empty_jd}.
+    `message` is bidder-facing; `status_code` is the last HTTP status seen.
+    """
+    def __init__(self, category: str, message: str, status_code=None):
+        super().__init__(message)
+        self.category = category
+        self.message = message
+        self.status_code = status_code
+
+
+# Page-text signals that a posting is closed (checked when a page DID load).
+_EXPIRED_SIGNALS = (
+    "no longer accepting", "no longer available", "position has been filled",
+    "this job is no longer", "posting has closed", "posting is closed",
+    "job not found", "position is closed", "this role is closed",
+    "applications are closed", "we are no longer accepting", "req closed",
+    "this opening is closed", "no longer open",
+)
+_LOGIN_SIGNALS = (
+    "sign in to apply", "log in to apply", "please sign in", "please log in",
+    "create an account", "you must be logged in", "authentication required",
+)
+_BLOCK_SIGNALS = (
+    "captcha", "cloudflare", "are you a robot", "verify you are human",
+    "access denied", "request blocked", "unusual traffic", "px-captcha",
+)
+
+
+def _classify_fetch_failure(url, status, html, err) -> JobFetchError:
+    """Turn a raw fetch failure into a categorized, actionable JobFetchError."""
+    text = (html or "").lower()
+    es = str(err or "").lower()
+
+    if status in (404, 410):
+        return JobFetchError(
+            "expired",
+            f"Posting is gone (HTTP {status}) — expired, filled, or the link is wrong. Skip this one.",
+            status)
+    if status in (401, 403):
+        if any(k in text for k in _BLOCK_SIGNALS):
+            return JobFetchError(
+                "blocked",
+                f"Site blocked automated access with a bot check (HTTP {status}). Open it in your browser and paste the JD manually.",
+                status)
+        if any(k in text for k in _LOGIN_SIGNALS) or "login" in text or "sign in" in text:
+            return JobFetchError(
+                "login_required",
+                f"This posting requires sign-in to view (HTTP {status}). Log in, copy the JD, and paste it manually.",
+                status)
+        return JobFetchError(
+            "blocked",
+            f"Access denied (HTTP {status}). Open it in your browser and paste the JD manually.",
+            status)
+    if status == 429:
+        return JobFetchError(
+            "fetch_failed",
+            "Site is rate-limiting us (HTTP 429). Wait a few minutes and retry, or paste the JD manually.",
+            status)
+    if isinstance(status, int) and status >= 500:
+        return JobFetchError(
+            "fetch_failed",
+            f"Site's server errored (HTTP {status}). Retry later, or paste the JD manually.",
+            status)
+
+    # Page loaded (or we have HTML) but extraction failed — look for signals.
+    if any(k in text for k in _EXPIRED_SIGNALS):
+        return JobFetchError(
+            "expired",
+            "The page says this job is closed / no longer accepting applications. Skip this one.",
+            status)
+    if any(k in text for k in _LOGIN_SIGNALS):
+        return JobFetchError(
+            "login_required",
+            "The job is behind a login. Sign in, copy the JD, and paste it manually.",
+            status)
+    if any(k in text for k in _BLOCK_SIGNALS):
+        return JobFetchError(
+            "blocked",
+            "The site blocked automated access (bot check). Open it in your browser and paste the JD manually.",
+            status)
+
+    # No HTTP response at all → network-level failure.
+    if status is None and not html:
+        if "timeout" in es or "timed out" in es:
+            return JobFetchError(
+                "fetch_failed",
+                "The page timed out before loading. Retry shortly, or open it in your browser and paste the JD manually.")
+        if any(k in es for k in ("getaddrinfo", "name or service", "nodename", "failed to resolve", "connection", "refused")):
+            return JobFetchError(
+                "fetch_failed",
+                "Couldn't connect to the site (it may be down or the link broken). Check the URL, or paste the JD manually.")
+        return JobFetchError(
+            "fetch_failed",
+            "Couldn't fetch the page. Open it in your browser and paste the JD manually.")
+
+    # Got a page but no JD text found.
+    return JobFetchError(
+        "empty_jd",
+        "Loaded the page but couldn't find the job description automatically. Open it and paste the JD manually.",
+        status)
+
+
 def _get(url: str, timeout: int = 20) -> requests.Response:
     return requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
 
@@ -662,9 +768,11 @@ def _fetch_job_posting_uncached(url: str) -> dict:
     last_err: Optional[Exception] = None
     last_html: Optional[str] = None
     last_url_used: Optional[str] = None
+    last_status: Optional[int] = None
     for u in candidates:
         try:
             r = _get(u)
+            last_status = r.status_code
             if r.status_code == 200 and len(r.text) > 500:
                 info = _extract_from_html(r.text)
                 # Description is "real" if we got >= 400 chars from heuristic
@@ -673,6 +781,10 @@ def _fetch_job_posting_uncached(url: str) -> dict:
                     return _finalize(info)
                 last_html = r.text
                 last_url_used = u
+            elif r.status_code != 200:
+                # Keep the body of an error page so the classifier can read
+                # "no longer accepting" / login / captcha signals from it.
+                last_html = last_html or (r.text if r.text else None)
         except Exception as e:
             last_err = e
 
@@ -689,4 +801,5 @@ def _fetch_job_posting_uncached(url: str) -> dict:
     if pw_info and pw_info.get("description"):
         return _finalize(pw_info)
 
-    raise RuntimeError(f"Could not fetch job page: {url} ({last_err})")
+    # Everything failed — classify into an actionable category for the bidder.
+    raise _classify_fetch_failure(url, last_status, last_html, last_err)

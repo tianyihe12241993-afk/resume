@@ -35,6 +35,11 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", APP_BASE_URL).rstrip("/")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TAILOR_MODEL = os.getenv("TAILOR_MODEL", "claude-sonnet-4-6")
 EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "claude-haiku-4-5-20251001")
+# Defensibility / judgment calls (adjacency bridges, truthful skills-rewrite).
+# These decide whether a JD skill is a real match, an adjacent bridge, or an
+# over-reach — the highest-leverage judgment in the pipeline — so they default
+# to the stronger model rather than the cheap extraction one.
+JUDGE_MODEL = os.getenv("JUDGE_MODEL", "claude-sonnet-4-6")
 
 # Email (magic link)
 SMTP_HOST = os.getenv("SMTP_HOST", "")

@@ -74,6 +74,19 @@ export interface Profile {
 
 export type JobStatus = 'pending' | 'fetching' | 'analyzing' | 'tailoring' | 'done' | 'needs_manual_jd' | 'error'
 
+export type FailReason =
+  | 'expired' | 'login_required' | 'blocked' | 'fetch_failed' | 'empty_jd' | 'processing_error'
+
+// Bidder-facing label, one-word action, and tone for each failure category.
+export const FAIL_REASON: Record<FailReason, { label: string; action: string; tone: 'red' | 'amber' | 'gray' }> = {
+  expired:          { label: 'Expired / filled',   action: 'Skip',        tone: 'red' },
+  login_required:   { label: 'Login required',     action: 'Log in + paste JD', tone: 'amber' },
+  blocked:          { label: 'Blocked (bot check)', action: 'Paste JD',    tone: 'amber' },
+  fetch_failed:     { label: "Couldn't fetch",     action: 'Retry / paste JD', tone: 'amber' },
+  empty_jd:         { label: 'No JD found',        action: 'Paste JD',    tone: 'amber' },
+  processing_error: { label: 'System error',       action: 'Retry',       tone: 'red' },
+}
+
 export interface CoverageTerm { term: string; weight: number }
 
 export interface CoverageReport {
@@ -97,6 +110,7 @@ export interface Job {
   work_type: 'remote' | 'hybrid' | 'onsite' | null
   description: string | null
   error_message: string | null
+  fail_reason: FailReason | null
   application_status: string
   applied_at: string | null
   application_note: string | null
@@ -141,6 +155,8 @@ export interface TodayJobRow {
   work_type: 'remote' | 'hybrid' | 'onsite' | null
   url: string
   status: JobStatus
+  fail_reason?: FailReason | null
+  error_message?: string | null
   application_status: string
   upload_match: 'tailored' | 'base' | 'other' | null
   apply_count: number

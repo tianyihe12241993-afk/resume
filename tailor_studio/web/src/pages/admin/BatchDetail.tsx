@@ -5,7 +5,7 @@ import {
   ChevronLeft, Download, ExternalLink, RotateCw, MessageSquare,
 } from 'lucide-react'
 import clsx from 'clsx'
-import { api, type BatchDetail, type Job } from '@/lib/api'
+import { api, type BatchDetail, type Job, FAIL_REASON } from '@/lib/api'
 import { Alert, Progress } from '@/components/ui'
 import { StatusOrb, rowTintForStatus } from '@/components/charts'
 import { formatDateTime } from '@/lib/format'
@@ -278,11 +278,24 @@ function AdminRow({
           {job.location && <span className="truncate" title={job.location}>{job.location}</span>}
           <CoverageInlineChip job={job} />
         </div>
-        {job.error_message && (
-          <p className="text-[11px] text-red-700 mt-1.5 line-clamp-2 bg-red-50 border border-red-200 rounded px-1.5 py-0.5" title={job.error_message}>
-            {job.error_message}
-          </p>
-        )}
+        {job.error_message && (() => {
+          const fr = job.fail_reason ? FAIL_REASON[job.fail_reason] : null
+          const tone = fr?.tone === 'red'
+            ? 'text-red-700 bg-red-50 border-red-200'
+            : 'text-amber-800 bg-amber-50 border-amber-200'
+          return (
+            <div className={clsx('mt-1.5 rounded border px-1.5 py-1', tone)}>
+              {fr && (
+                <div className="flex items-center gap-1.5 text-[11px] font-semibold mb-0.5">
+                  <span>{fr.label}</span>
+                  <span className="opacity-60">·</span>
+                  <span className="uppercase tracking-wide opacity-80">{fr.action}</span>
+                </div>
+              )}
+              <p className="text-[11px] line-clamp-2" title={job.error_message}>{job.error_message}</p>
+            </div>
+          )
+        })()}
       </td>
 
       {/* JD: dedicated prominent open-link column */}

@@ -22,6 +22,14 @@ PORT = int(os.getenv("STUDIO_PORT", "8001"))
 HOST = os.getenv("STUDIO_HOST", "127.0.0.1")
 WORKERS = int(os.getenv("STUDIO_WORKERS", "8"))
 MAX_RESUME_BYTES = 10 * 1024 * 1024
+
+# Re-run the LLM adjacency proposer on the tailored doc to score final coverage.
+# ON (default) → final coverage credits adjacent matches the same way the
+# initial score does (accurate before/after). OFF → skip it (~8-10s faster per
+# JD); the resume .docx is IDENTICAL either way — only the displayed coverage
+# number changes, and both sides fall back to deterministic adjacency so the
+# before/after comparison stays consistent.
+FINAL_ADJACENCY = os.getenv("FINAL_ADJACENCY", "1").strip().lower() not in ("0", "false", "no", "off", "")
 MAX_URLS_PER_BATCH = int(os.getenv("STUDIO_MAX_URLS_PER_BATCH", "200"))
 
 # ── Single-user auth ─────────────────────────────────────────────────────
@@ -34,6 +42,17 @@ SESSION_TTL_SECONDS = 14 * 24 * 3600  # 14 days
 # signup is auto-approved. Everyone else signs up "pending" and the admin
 # approves them.
 ADMIN_EMAIL = os.getenv("STUDIO_ADMIN_EMAIL", "").strip().lower()
+# Multiple admins: comma-separated list, e.g. STUDIO_ADMIN_EMAILS="a@x.com,b@y.com".
+# Combined with the single STUDIO_ADMIN_EMAIL above for backward compatibility.
+ADMIN_EMAILS = {
+    e.strip().lower()
+    for e in (os.getenv("STUDIO_ADMIN_EMAILS", "").split(",") + [ADMIN_EMAIL])
+    if e.strip()
+}
+# Bootstrap: when no admin is configured AND none exists yet, the FIRST account
+# to sign up becomes the admin. Lets a fresh clone "just register as admin"
+# with zero config. Set STUDIO_BOOTSTRAP_ADMIN=0 to disable (e.g. public deploys).
+BOOTSTRAP_FIRST_ADMIN = os.getenv("STUDIO_BOOTSTRAP_ADMIN", "1").strip().lower() not in ("0", "false", "no", "off", "")
 # Optional: free Giphy API key (https://developers.giphy.com) to enable GIF
 # search in the team chat. Without it, GIF search is hidden but pasted GIF/image
 # links still render inline.

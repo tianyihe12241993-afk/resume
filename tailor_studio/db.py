@@ -121,6 +121,11 @@ class JobUrl(Base):
 
     status: Mapped[str] = mapped_column(String(32), nullable=False, default=STATUS_PENDING)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Classified failure category when status is needs_manual_jd / error — e.g.
+    # "expired", "login_required", "blocked", "fetch_failed", "empty_jd". Lets
+    # the UI show a precise badge + action so bidders know whether to skip,
+    # retry, log in, or paste the JD. NULL when there's no failure.
+    fail_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
     company: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -155,6 +160,11 @@ class JobUrl(Base):
     # co-worker uploaded the right file. Lazily populated by the resume_for
     # endpoint on first observation.
     resume_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # SHA-256 of the tailored .pdf rendition. Most job portals want PDF, so the
+    # bidder usually uploads this, not the .docx. Populated when the PDF is
+    # generated (the /download/<id>/pdf route) so the upload can be verified
+    # against either format.
+    pdf_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     # What file the extension saw uploaded in the job-page form.
     upload_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     upload_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -260,7 +270,9 @@ def init_db() -> None:
         if "work_type" not in cols:
             conn.execute(text("ALTER TABLE job_url ADD COLUMN work_type VARCHAR(16)"))
         for col_name, col_sql in [
+            ("fail_reason",         "VARCHAR(32)"),
             ("resume_sha256",       "VARCHAR(64)"),
+            ("pdf_sha256",          "VARCHAR(64)"),
             ("upload_filename",     "VARCHAR(255)"),
             ("upload_size",         "INTEGER"),
             ("upload_sha256",       "VARCHAR(64)"),

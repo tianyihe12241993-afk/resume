@@ -88,10 +88,15 @@
   // ── Resume Ready widget ─────────────────────────────────────────────────
   let widgetEl = null;
   let lastResumeUrl = null;
-  // What we last auto-downloaded for the current page; used by the upload
-  // observer to verify the co-worker uploaded the matching file.
-  let expectedResume = null;  // { filename, size, sha256 }
+  // The tailored file the bidder is expected to upload for the current page;
+  // used by the upload observer to verify the matching file was uploaded.
+  let expectedResume = null;  // { filename, size, sha256, pdfSha256 }
   let lastWidgetState = null;
+  // Once the user closes the widget it stays closed — SPA navigations
+  // (pushState/replaceState) must not re-open it. `uploadShown` keeps the
+  // upload-verification result from being clobbered by the passive widget.
+  let dismissed = false;
+  let uploadShown = false;
 
   function ensureWidget() {
     if (widgetEl && document.body.contains(widgetEl)) return widgetEl;
@@ -111,6 +116,7 @@
   }
 
   function dismissWidget() {
+    dismissed = true;
     if (widgetEl) { try { widgetEl.remove(); } catch {} widgetEl = null; }
   }
 
@@ -180,6 +186,8 @@
     // runs in every iframe (all_frames:true is needed for ADP rescue).
     // We only want one widget per page — only the top frame paints it.
     if (window.top !== window.self) return;
+    // User closed it, or an upload result is showing — don't re-open/clobber.
+    if (dismissed || uploadShown) return;
     const url = location.href;
     if (url === lastResumeUrl) return;
     lastResumeUrl = url;
@@ -215,20 +223,19 @@
       const t = info.tailored;
       // Remember the expected file's fingerprint so the upload observer
       // can verify the co-worker uploads this one and not something else.
-      expectedResume = { filename: t.filename, size: t.size, sha256: t.sha256 };
-      // Silent auto-download.
-      const dl = await send({ type: 'download_resume', path: t.docx_url, filename: t.filename });
-      const ok = dl && dl.ok;
+      expectedResume = { filename: t.filename, size: t.size, sha256: t.sha256, pdfSha256: t.pdf_sha256 || null };
+      // No auto-download — the bidder picks .docx or .pdf and uploads it. We
+      // still watch the upload form to verify the right file goes up.
       lastWidgetState = 'ready';
       renderWidget({
         tone: 'green',
         header: `Tailored ✓  ${info.company || ''}`.trim(),
         filename: t.filename,
-        body: ok ? 'Auto-downloaded — watching upload form…' : 'Click to download',
+        body: 'Download .docx or PDF, then upload it on the job site.',
         actions: [
-          { label: '↓ Re-download .docx',
+          { label: '↓ Download .docx',
             onClick: async () => { await send({ type: 'download_resume', path: t.docx_url, filename: t.filename }); } },
-          { label: '↓ pdf',
+          { label: '↓ Download PDF',
             onClick: async () => { await send({ type: 'download_resume', path: t.pdf_url, filename: t.filename.replace(/\.docx$/i, '.pdf') }); } },
         ],
       });
@@ -302,29 +309,42 @@
     if (file.size > 50 * 1024 * 1024) return;
     const sha = await sha256File(file);
     if (!sha) return;
+    const payload = { sha, name: file.name, size: file.size };
+    if (window.top === window.self) {
+      handleUpload(payload);
+    } else {
+      // The file input lives in an embedded ATS iframe (Greenhouse, ADP, etc.).
+      // Bubble the observation up to the top frame, which owns the widget and
+      // the URL that matches the tracked job.
+      try { window.top.postMessage({ __tailorStudioUpload: true, ...payload }, '*'); } catch {}
+    }
+  }
 
+  // Runs only in the TOP frame: classifies the upload, records it against the
+  // top-frame URL (the tracked job), and shows/updates the widget.
+  async function handleUpload({ sha, name, size }) {
     // Local verdict (instant feedback) — server confirms with profile_base
     // comparison in its response.
     let verdict = 'other';
-    if (expectedResume && expectedResume.sha256 === sha) verdict = 'tailored';
-
-    // Update widget immediately based on local verdict; server response
-    // refines to 'base' when applicable.
-    showUploadStatus(verdict, file);
-
+    if (expectedResume && (expectedResume.sha256 === sha || expectedResume.pdfSha256 === sha)) verdict = 'tailored';
+    showUploadStatus(verdict, { name, size });
     const resp = await send({
       type: 'upload_observed',
       url: location.href,
-      filename: file.name,
-      size: file.size,
+      filename: name,
+      size,
       sha256: sha,
     });
     if (resp && resp.match && resp.match !== verdict) {
-      showUploadStatus(resp.match, file);
+      showUploadStatus(resp.match, { name, size });
     }
   }
 
   function showUploadStatus(verdict, file) {
+    // An upload result is the most important thing to show — let it appear even
+    // if the passive widget was dismissed, and keep it sticky afterwards.
+    dismissed = false;
+    uploadShown = true;
     if (verdict === 'tailored') {
       renderWidget({
         tone: 'green',
@@ -359,8 +379,10 @@
   }
 
   function startUploadObserver() {
-    // Only meaningful in the top frame (where the widget lives).
-    if (window.top !== window.self) return;
+    // Hook file inputs in EVERY frame — embedded ATS forms (Greenhouse, ADP,
+    // SmartRecruiters) put the upload field inside an iframe, so a top-frame-
+    // only observer would never see the upload. Child frames bubble what they
+    // see up to the top frame via postMessage.
     hookFileInputs(document);
     const mo = new MutationObserver((muts) => {
       for (const m of muts) {
@@ -375,6 +397,16 @@
       }
     });
     mo.observe(document.documentElement, { childList: true, subtree: true });
+
+    // Top frame receives uploads bubbled up from child-frame file inputs.
+    if (window.top === window.self) {
+      window.addEventListener('message', (e) => {
+        const d = e.data;
+        if (d && d.__tailorStudioUpload && typeof d.sha === 'string') {
+          handleUpload({ sha: d.sha, name: d.name, size: d.size });
+        }
+      });
+    }
   }
 
   // ── Essay-question detection (Tier 3 / "Draft answers") ───────────────

@@ -12,6 +12,7 @@ data/jd_spec_cache/
 data/adjacency_cache/
 data/bullet_rewrite_cache/
 data/tailor_cache/
+data/skills_cache/
 data/scrape_cache/
 data/profile_cache/
 data/answer_cache/

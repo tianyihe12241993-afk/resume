@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type AdminDashboard, type ProfileStatus } from '@/lib/api'
+import { api, type AdminDashboard, type ProfileStatus, FAIL_REASON } from '@/lib/api'
 import { Alert } from '@/components/ui'
 import { Avatar, MiniDonut, StatTile, WeekHeatmap, paletteForName } from '@/components/charts'
 import { formatLongDate } from '@/lib/format'
 import {
   ArrowRight, Target, CheckCircle2, Sparkles, TrendingUp,
-  Plus, Upload, AlertCircle, Lock,
+  Plus, Upload, Download, AlertCircle, Lock,
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -118,9 +118,17 @@ export default function Dashboard() {
           </p>
           <h1 className="text-2xl font-bold text-gray-900">Today</h1>
         </div>
-        <Link to="/admin/calendar" className="btn-secondary text-sm">
-          All days <ArrowRight className="w-4 h-4" />
-        </Link>
+        <div className="flex items-center gap-2">
+          <a href={`/download/resumes/zip?date=${data.today}`} className="btn-secondary text-sm" title="Download every tailored resume from today as a zip">
+            <Download className="w-4 h-4" /> Today’s resumes
+          </a>
+          <a href="/download/resumes/zip" className="btn-secondary text-sm" title="Download every tailored resume (full archive) as a zip">
+            <Download className="w-4 h-4" /> All
+          </a>
+          <Link to="/admin/calendar" className="btn-secondary text-sm">
+            All days <ArrowRight className="w-4 h-4" />
+          </Link>
+        </div>
       </div>
 
       {/* ── Profile filter chips ──────────────────────────────────── */}
@@ -220,6 +228,16 @@ export default function Dashboard() {
             )}
           </div>
         </>
+      )}
+
+      {/* ── Jobs needing attention (fetch/JD failures) ────────────── */}
+      {profile_statuses.length > 0 && (
+        <NeedsAttentionPanel jobs={filtered.today_jobs} />
+      )}
+
+      {/* ── Resume upload verification ────────────────────────────── */}
+      {profile_statuses.length > 0 && (
+        <UploadVerificationPanel jobs={filtered.today_jobs} />
       )}
 
       {/* ── This week's work per profile (one consolidated table) ──── */}
@@ -614,6 +632,126 @@ function StartBatchDialog({
   )
 }
 
+
+
+function NeedsAttentionPanel({ jobs }: { jobs: AdminDashboard['today_jobs'] }) {
+  const stuck = jobs.filter((j) => j.status === 'needs_manual_jd' || j.status === 'error')
+  if (stuck.length === 0) return null
+  // Expired/skip first (terminal), then recoverable ones.
+  const ordered = [...stuck].sort(
+    (a, b) => (a.fail_reason === 'expired' ? 0 : 1) - (b.fail_reason === 'expired' ? 0 : 1),
+  )
+  return (
+    <div className="mb-6">
+      <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
+        Needs attention
+        <span className="text-gray-400 normal-case font-normal">· {stuck.length} job{stuck.length > 1 ? 's' : ''} couldn’t be tailored automatically</span>
+      </h2>
+      <ul className="space-y-1.5">
+        {ordered.map((j) => {
+          const fr = j.fail_reason ? FAIL_REASON[j.fail_reason] : null
+          const tone = fr?.tone === 'red'
+            ? 'border-rose-300 bg-rose-50/60'
+            : 'border-amber-300 bg-amber-50/60'
+          const chip = fr?.tone === 'red'
+            ? 'bg-rose-100 text-rose-800 border-rose-200'
+            : 'bg-amber-100 text-amber-800 border-amber-200'
+          return (
+            <li key={j.job_id} className={clsx('flex items-start gap-3 px-3 py-2 rounded-md border', tone)}>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-gray-900 truncate">
+                  {j.company || '—'}
+                  <span className="ml-2 text-xs font-normal text-gray-500">{j.profile_name}</span>
+                </p>
+                {j.title && <p className="text-xs text-gray-600 truncate">{j.title}</p>}
+                {j.error_message && <p className="text-[11px] text-gray-600 mt-0.5 line-clamp-2">{j.error_message}</p>}
+              </div>
+              {fr && (
+                <span className={clsx('inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border whitespace-nowrap', chip)}>
+                  {fr.label} · {fr.action}
+                </span>
+              )}
+              <Link to={`/admin/batches/${j.batch_id}`} className="btn-secondary text-xs py-1 px-2.5 whitespace-nowrap">Open →</Link>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
+
+const UPLOAD_VERDICT = {
+  tailored: { label: 'Verified', icon: '✓', chip: 'bg-emerald-100 text-emerald-800 border-emerald-200', row: 'border-emerald-200 bg-emerald-50/50' },
+  base:     { label: 'Base resume — not tailored', icon: '⚠', chip: 'bg-amber-100 text-amber-800 border-amber-200', row: 'border-amber-300 bg-amber-50/60' },
+  other:    { label: 'Unrecognized file', icon: '✗', chip: 'bg-rose-100 text-rose-800 border-rose-200', row: 'border-rose-300 bg-rose-50/60' },
+} as const
+
+function UploadVerificationPanel({ jobs }: { jobs: AdminDashboard['today_jobs'] }) {
+  // Only jobs where the extension actually observed an upload have a verdict.
+  const observed = jobs.filter((j) => j.upload_match === 'tailored' || j.upload_match === 'base' || j.upload_match === 'other')
+  if (observed.length === 0) return null
+
+  const verified = observed.filter((j) => j.upload_match === 'tailored')
+  // Surface the ones that need attention first.
+  const problems = observed
+    .filter((j) => j.upload_match !== 'tailored')
+    .sort((a, b) => (a.upload_match === 'other' ? 0 : 1) - (b.upload_match === 'other' ? 0 : 1))
+
+  return (
+    <div className="mb-6">
+      <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
+        Resume uploads
+        <span className="text-gray-400 normal-case font-normal">· what bidders actually submitted today</span>
+      </h2>
+
+      <div className="flex items-center gap-2 flex-wrap mb-3">
+        <span className={clsx('inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full border', UPLOAD_VERDICT.tailored.chip)}>
+          {UPLOAD_VERDICT.tailored.icon} {verified.length} verified
+        </span>
+        {problems.some((j) => j.upload_match === 'base') && (
+          <span className={clsx('inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full border', UPLOAD_VERDICT.base.chip)}>
+            {UPLOAD_VERDICT.base.icon} {problems.filter((j) => j.upload_match === 'base').length} base resume
+          </span>
+        )}
+        {problems.some((j) => j.upload_match === 'other') && (
+          <span className={clsx('inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full border', UPLOAD_VERDICT.other.chip)}>
+            {UPLOAD_VERDICT.other.icon} {problems.filter((j) => j.upload_match === 'other').length} unrecognized
+          </span>
+        )}
+      </div>
+
+      {problems.length > 0 ? (
+        <ul className="space-y-1.5">
+          {problems.map((j) => {
+            const v = UPLOAD_VERDICT[j.upload_match as 'base' | 'other']
+            return (
+              <li key={j.job_id} className={clsx('flex items-center gap-3 px-3 py-2 rounded-md border', v.row)}>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-gray-900 truncate">
+                    {j.company || '—'}
+                    <span className="ml-2 text-xs font-normal text-gray-500">{j.profile_name}</span>
+                  </p>
+                  {j.title && <p className="text-xs text-gray-600 truncate">{j.title}</p>}
+                </div>
+                <span className={clsx('inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border whitespace-nowrap', v.chip)}>
+                  {v.icon} {v.label}
+                </span>
+                <Link to={`/admin/batches/${j.batch_id}`} className="btn-secondary text-xs py-1 px-2.5 whitespace-nowrap">
+                  Open →
+                </Link>
+              </li>
+            )
+          })}
+        </ul>
+      ) : (
+        <div className="flex items-center gap-2 text-sm font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-2">
+          <CheckCircle2 className="w-4 h-4" /> Every observed upload today was the correct tailored resume.
+        </div>
+      )}
+    </div>
+  )
+}
 
 
 function DuplicatesDialog({

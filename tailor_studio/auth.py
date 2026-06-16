@@ -140,16 +140,30 @@ def create_user(db: Session, email: str, password: str, approved: bool = False,
     return user
 
 
+def is_configured_admin(email: str) -> bool:
+    """True if `email` is in the configured admin allow-list."""
+    return normalize_email(email) in config.ADMIN_EMAILS
+
+
+def admin_exists(db: Session) -> bool:
+    """Whether any admin account exists yet (used by the first-user bootstrap)."""
+    return db.query(User.id).filter(User.is_admin == True).first() is not None  # noqa: E712
+
+
 def ensure_admin(db: Session) -> None:
-    """Promote the configured STUDIO_ADMIN_EMAIL account to is_admin + approved.
-    Runs on startup so the admin is always able to log in and approve others."""
-    email = (config.ADMIN_EMAIL or "").strip().lower()
-    if not email:
-        return
-    u = get_user_by_email(db, email)
-    if u and not (u.is_admin and u.approved):
-        u.is_admin = True
-        u.approved = True
+    """Promote every configured admin email to is_admin + approved. Runs on
+    startup so admins can always log in and approve others. Supports a team of
+    admins via STUDIO_ADMIN_EMAILS (comma-separated)."""
+    changed = False
+    for email in config.ADMIN_EMAILS:
+        if not email:
+            continue
+        u = get_user_by_email(db, email)
+        if u and not (u.is_admin and u.approved):
+            u.is_admin = True
+            u.approved = True
+            changed = True
+    if changed:
         db.commit()
 
 

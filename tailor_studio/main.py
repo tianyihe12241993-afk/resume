@@ -250,7 +250,11 @@ def _job_for_user(jid: int, user) -> JobUrl:
         if b is None:
             raise HTTPException(404, "No tailored output.")
         p = db.get(Profile, b.profile_id)
-        if p is None or p.user_id != user.id:
+        # Access = the profile's owner, an admin, OR a bidder the profile was
+        # assigned to (ProfileAccess grant) — same model the rest of the app
+        # uses. Owner-only would 404 every bidder download.
+        from .api import _can_access_profile
+        if p is None or not (getattr(user, "is_admin", False) or _can_access_profile(db, user, p)):
             raise HTTPException(404, "No tailored output.")
         # Detach so the caller can use j after the session closes.
         db.expunge(j); db.expunge(b); db.expunge(p)
@@ -274,9 +278,17 @@ def download_pdf(jid: int, me=Depends(auth.require_user)):
         pdf_path, err = make_pdf(j.docx_filename)
         if pdf_path is None or not pdf_path.exists():
             raise HTTPException(500, f"PDF generation failed: {err or 'unknown error'}")
-        # Stash the filename so the row exposes its existence to the UI.
-        if j.pdf_filename != pdf_path.name:
+        # Stash the filename + content hash so the upload-observer can verify a
+        # PDF upload (not just the .docx). Always re-hash the served file: a
+        # re-tailored job regenerates the PDF under the SAME filename, so a
+        # name-only check would leave a stale hash. Hashing a ~100KB PDF is
+        # ~1ms. The bidder downloads before uploading, so this is populated in
+        # time to classify the upload.
+        from .api import _file_sha256
+        pdf_sha = _file_sha256(pdf_path)
+        if j.pdf_filename != pdf_path.name or j.pdf_sha256 != pdf_sha:
             j.pdf_filename = pdf_path.name
+            j.pdf_sha256 = pdf_sha
             db.commit()
         bits = _filename_bits(j) or [f"job{jid}"]
         return FileResponse(
@@ -312,6 +324,122 @@ def download_tailored(jid: int, me=Depends(auth.require_user)):
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             ),
             filename="__".join(bits) + ".docx",
+        )
+    finally:
+        db.close()
+
+
+def _zip_entry_name(profile_name: str, j: JobUrl, ext: str) -> str:
+    """Readable path inside the zip: 'Joshua/Company__Role.docx' so resumes are
+    easy to find per-candidate when prepping for interviews."""
+    prof = _slug(profile_name) or "candidate"
+    company = _slug(j.company or "") or "company"
+    title = _slug(j.title or "") or "role"
+    return f"{prof}/{company}__{title}__job{j.id}.{ext}"
+
+
+def _build_resume_zip(jobs, *, generate_missing_pdf=False):
+    """Zip every tailored .docx for `jobs`, plus PDFs. Each job must carry a
+    `._zip_profile` attribute (the profile name). Returns (BytesIO, count).
+
+    generate_missing_pdf=False (default, for bulk archives): include only PDFs
+    already on disk — never drive Word for a big batch (slow/unreliable). True
+    (small per-batch zips): generate any missing PDFs on the fly.
+    """
+    import io, zipfile
+    from .pdf_export import make_pdf, _pdf_path_for
+    buf = io.BytesIO()
+    added = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for j in jobs:
+            if not j.docx_filename:
+                continue
+            docx_path = config.OUTPUTS_DIR / j.docx_filename
+            if not docx_path.exists():
+                continue
+            pname = getattr(j, "_zip_profile", None) or "candidate"
+            z.write(docx_path, _zip_entry_name(pname, j, "docx"))
+            added += 1
+            try:
+                pdf_path = _pdf_path_for(j.docx_filename)
+                if not pdf_path.exists() and generate_missing_pdf:
+                    pdf_path, _ = make_pdf(j.docx_filename)
+                if pdf_path and pdf_path.exists():
+                    z.write(pdf_path, _zip_entry_name(pname, j, "pdf"))
+            except Exception:
+                pass  # PDF is best-effort; the .docx is always included
+    buf.seek(0)
+    return buf, added
+
+
+@app.get("/download/batch/{bid}/zip")
+def download_batch_zip(bid: int, me=Depends(auth.require_user)):
+    """Zip all tailored resumes (.docx + .pdf) in one batch."""
+    from .api import _can_access_profile
+    from fastapi.responses import StreamingResponse
+    db = get_session()
+    try:
+        b = db.get(Batch, bid)
+        if b is None:
+            raise HTTPException(404, "Batch not found.")
+        p = db.get(Profile, b.profile_id)
+        if p is None or not (getattr(me, "is_admin", False) or _can_access_profile(db, me, p)):
+            raise HTTPException(404, "Batch not found.")
+        jobs = db.query(JobUrl).filter(JobUrl.batch_id == bid).all()
+        for j in jobs:
+            j._zip_profile = p.name
+        buf, n = _build_resume_zip(jobs, generate_missing_pdf=True)
+        if n == 0:
+            raise HTTPException(404, "No tailored resumes in this batch yet.")
+        fname = f"{_slug(p.name)}__batch{bid}__{n}_resumes.zip"
+        return StreamingResponse(
+            buf, media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        )
+    finally:
+        db.close()
+
+
+@app.get("/download/resumes/zip")
+def download_all_resumes_zip(date: str | None = None, me=Depends(auth.require_user)):
+    """Zip EVERY tailored resume the user can access — the daily archive for
+    future interviews. Optional ?date=YYYY-MM-DD (US Pacific) limits to batches
+    created that day; omit it to archive everything."""
+    from .api import _accessible_pids
+    from fastapi.responses import StreamingResponse
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    db = get_session()
+    try:
+        pids = _accessible_pids(db, me)
+        if not pids:
+            raise HTTPException(404, "No accessible profiles.")
+        profiles = {p.id: p.name for p in db.query(Profile).filter(Profile.id.in_(pids)).all()}
+        q = (db.query(JobUrl, Batch.profile_id)
+             .join(Batch, JobUrl.batch_id == Batch.id)
+             .filter(Batch.profile_id.in_(pids)))
+        if date:
+            try:
+                pt = ZoneInfo("America/Los_Angeles")
+                day = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=pt)
+            except ValueError:
+                raise HTTPException(400, "Bad date — use YYYY-MM-DD.")
+            start = day.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+            end = (day + timedelta(days=1)).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+            q = q.filter(Batch.created_at >= start, Batch.created_at < end)
+        rows = q.all()
+        jobs = []
+        for j, profile_id in rows:
+            j._zip_profile = profiles.get(profile_id, "candidate")
+            jobs.append(j)
+        buf, n = _build_resume_zip(jobs)
+        if n == 0:
+            raise HTTPException(404, "No tailored resumes found for that selection.")
+        label = date or "all"
+        fname = f"resumes__{label}__{n}_files.zip"
+        return StreamingResponse(
+            buf, media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
         )
     finally:
         db.close()

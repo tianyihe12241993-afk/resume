@@ -94,7 +94,12 @@ def api_signup(body: SignupIn, response: Response, db: Session = Depends(get_db)
         raise HTTPException(400, err)
     if auth.get_user_by_email(db, body.email) is not None:
         raise HTTPException(409, "An account with that email already exists.")
-    is_admin = auth.normalize_email(body.email) == config.ADMIN_EMAIL
+    # Admin if the email is in the configured allow-list, OR (bootstrap) this is
+    # the first account on a fresh instance with no admin yet — so a freshly
+    # cloned deployment can just register its first user as the admin.
+    is_admin = auth.is_configured_admin(body.email) or (
+        config.BOOTSTRAP_FIRST_ADMIN and not auth.admin_exists(db)
+    )
     user = auth.create_user(db, body.email, body.password,
                             approved=is_admin, is_admin=is_admin)
     auth.issue_session(response, user.id)
@@ -195,6 +200,7 @@ def _job_out(j: JobUrl, *, with_coverage: bool = False) -> dict:
         "work_type": j.work_type,
         "description": j.description,
         "error_message": j.error_message,
+        "fail_reason": j.fail_reason,
         "application_status": j.application_status,
         "applied_at": _iso(j.applied_at),
         "application_note": j.application_note,
@@ -361,6 +367,8 @@ def api_dashboard(
             "work_type": j.work_type,
             "url": j.url,
             "status": j.status,
+            "fail_reason": j.fail_reason,
+            "error_message": j.error_message,
             "application_status": j.application_status,
             "upload_match": j.upload_match,
             "apply_count": j.apply_count or 0,
@@ -941,6 +949,9 @@ def api_extension_resume_for(
             "filename": fname,
             "size": size,
             "sha256": sha,
+            # Null until the PDF is first generated; the extension matches the
+            # upload against either hash so a PDF upload still verifies.
+            "pdf_sha256": j.pdf_sha256,
         }
 
     return {
@@ -1050,6 +1061,10 @@ def api_extension_upload_observed(
             if path.exists():
                 j.resume_sha256 = _file_sha256(path)
         if j.resume_sha256 and body.sha256 == j.resume_sha256:
+            match = "tailored"
+        elif j.pdf_sha256 and body.sha256 == j.pdf_sha256:
+            # Uploaded the PDF rendition of the tailored resume — most portals
+            # want PDF, so this is the common success case.
             match = "tailored"
         elif base_sha(p.id) and body.sha256 == base_sha(p.id):
             match = "base"

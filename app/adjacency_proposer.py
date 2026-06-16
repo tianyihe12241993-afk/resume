@@ -145,7 +145,7 @@ _adj_mem_cache: dict[str, list[dict]] = {}
 
 def _adj_cache_key(term: str, weight: float, role_family: str, bullets_block: str) -> str:
     blob = json.dumps({
-        "model": config.EXTRACT_MODEL,
+        "model": config.JUDGE_MODEL,
         "system": _SYSTEM,
         "term": term,
         "weight": round(float(weight), 3),
@@ -156,7 +156,7 @@ def _adj_cache_key(term: str, weight: float, role_family: str, bullets_block: st
 
 
 def _propose_for_term(term: str, weight: float, role_family: str, bullets_block: str) -> list[dict]:
-    """One Haiku call. Returns raw match dicts (pre-validation). Cached on disk."""
+    """One judge-model call. Returns raw match dicts (pre-validation). Cached on disk."""
     key = _adj_cache_key(term, weight, role_family, bullets_block)
     cached = _adj_mem_cache.get(key)
     if cached is None:
@@ -170,19 +170,37 @@ def _propose_for_term(term: str, weight: float, role_family: str, bullets_block:
     if cached is not None:
         return cached
 
-    user = (
-        f"JD TERM: \"{term}\" (weight {weight:.2f})\n"
+    # Prompt-caching layout. Two stable prefixes get `cache_control` markers so
+    # the ~24-32 adjacency calls within one JD only pay full price for the tiny
+    # per-term tail:
+    #   1. System prompt — identical across every adjacency call ever made
+    #      (cached batch-wide, 5-min TTL refreshed on use).
+    #   2. JD role + full resume bullets — identical across all terms within one
+    #      JD (the resume doesn't change between terms). This is the bulk of the
+    #      input (~3k tokens), so caching it is the real saving.
+    # Only the per-term instruction (a few dozen tokens) is billed in full each
+    # call.
+    shared_context = (
         f"JD ROLE: {role_family or '(unknown)'}\n\n"
-        f"RESUME BULLETS:\n{bullets_block}\n\n"
+        f"RESUME BULLETS:\n{bullets_block}"
+    )
+    per_term = (
+        f"JD TERM: \"{term}\" (weight {weight:.2f})\n\n"
         f"For the JD term, identify up to 3 bullets whose actual content truthfully evidences this term. "
         f"Quote the supporting language verbatim. Better none than a stretched match."
     )
     resp = _client().messages.create(
-        model=config.EXTRACT_MODEL,
+        model=config.JUDGE_MODEL,
         max_tokens=900,
         temperature=0,
-        system=_SYSTEM,
-        messages=[{"role": "user", "content": user}],
+        system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": shared_context, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": per_term},
+            ],
+        }],
     )
     text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
     parsed = _extract_tagged_json(text)
@@ -249,9 +267,16 @@ def propose_adjacencies(
         return gap_entry, valid
 
     if parallel > 1 and len(targets) > 1:
+        # Cache warmup: run the first term sequentially so the shared cache
+        # prefix (system prompt + resume bullets, identical across every term
+        # in this JD) gets written exactly once. Without it, the first ~parallel
+        # calls fire simultaneously, all miss the not-yet-written cache, and
+        # each re-writes the ~4k-token prefix at the 1.25x write rate. Warming
+        # first turns the rest into 0.1x cache reads.
+        first = _run(targets[0])
         with ThreadPoolExecutor(max_workers=parallel) as ex:
-            futs = [ex.submit(_run, g) for g in targets]
-            results = [f.result() for f in as_completed(futs)]
+            futs = [ex.submit(_run, g) for g in targets[1:]]
+            results = [first] + [f.result() for f in as_completed(futs)]
     else:
         results = [_run(g) for g in targets]
 

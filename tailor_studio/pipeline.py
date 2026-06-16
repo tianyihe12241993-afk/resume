@@ -14,16 +14,17 @@ from pathlib import Path
 from typing import Optional
 
 from app.adjacency_proposer import propose_adjacencies
-from app.bullet_rewriter import rewrite_and_validate
+from app.bullet_rewriter import rewrite_and_validate, _build_resume_wide_allowlist
 from app.coverage_map import _make_pattern, build_coverage_map
 from app.jd_analyzer import analyze_jd
-from app.scraping import fetch_job_posting
+from app.scraping import fetch_job_posting, JobFetchError
 from app.similarity import compare as similarity_compare, docx_text
 from app.tailoring import (
     apply_tailoring,
     normalize_job_info,
     parse_resume_from_path,
     tailor_resume,
+    tailor_skills,
 )
 
 from . import config, storage
@@ -166,17 +167,34 @@ def _run_single(job_url_id: int) -> None:
         # 1. Fetch JD
         ju.status = STATUS_FETCHING
         ju.error_message = None
+        ju.fail_reason = None
         db.commit()
         try:
             jd_text, title, company, location, work_type = _resolve_jd(ju)
+        except JobFetchError as e:
+            # Classified failure: "expired" is terminal (skip); everything else
+            # is recoverable by pasting the JD manually.
+            ju.status = STATUS_ERROR if e.category == "expired" else STATUS_NEEDS_JD
+            ju.fail_reason = e.category
+            ju.error_message = e.message
+            db.commit()
+            return
         except Exception as e:
             ju.status = STATUS_NEEDS_JD
-            ju.error_message = f"Scrape failed: {e}. Paste JD manually."
+            ju.fail_reason = "fetch_failed"
+            ju.error_message = (
+                f"Couldn't fetch the page ({type(e).__name__}). "
+                "Open it in your browser and paste the JD manually."
+            )
             db.commit()
             return
         if not jd_text or len(jd_text.strip()) < 200:
             ju.status = STATUS_NEEDS_JD
-            ju.error_message = "Auto-scrape returned too little text. Paste JD manually."
+            ju.fail_reason = "empty_jd"
+            ju.error_message = (
+                "Loaded the page but the job description was too short to use. "
+                "Open it and paste the full JD manually."
+            )
             db.commit()
             return
         if title and not ju.title:
@@ -196,9 +214,14 @@ def _run_single(job_url_id: int) -> None:
         db.commit()
         spec = analyze_jd(jd_text, title=ju.title or "", company=ju.company or "")
         resume_struct = parse_resume_from_path(src_docx)
-        cmap = build_coverage_map(spec, resume_struct)
-        cmap = propose_adjacencies(spec, cmap, resume_struct)
-        coverage_initial = dict(cmap["summary"])
+        cmap_base = build_coverage_map(spec, resume_struct)
+        # LLM adjacency is always run here — it feeds the skills allowlist, so
+        # the tailored resume depends on it regardless of scoring config.
+        cmap = propose_adjacencies(spec, cmap_base, resume_struct)
+        # Score the "before" the same way we'll score the "after": with LLM
+        # adjacency when FINAL_ADJACENCY is on, deterministic-only when off — so
+        # the displayed before/after is always an apples-to-apples comparison.
+        coverage_initial = dict((cmap if config.FINAL_ADJACENCY else cmap_base)["summary"])
         original_text = docx_text(src_docx)
         coverage_initial["similarity"] = similarity_compare(original_text, jd_text)
 
@@ -270,6 +293,32 @@ def _run_single(job_url_id: int) -> None:
         if claimed:
             enriched = _apply_claimed_terms(enriched, claimed)
 
+        # LLM skills-rewriter on top of the deterministic enriched baseline:
+        # reorder rows + items by JD priority, canonicalize names to the JD's
+        # spelling, and fold in any JD skill the candidate truthfully has. It
+        # may ONLY add terms in the resume-wide allowlist (covered exact +
+        # adjacent + user-claimed) — so it surfaces real, defensible skills
+        # and never fabricates. Falls back to `enriched` on any failure.
+        try:
+            jd_terms = [
+                s.get("term", "")
+                for s in sorted(
+                    spec.get("hard_skills") or [],
+                    key=lambda x: -float(x.get("weight", 0) or 0),
+                )
+                if s.get("term")
+            ]
+            allowed = [
+                e.get("term", "")
+                for e in _build_resume_wide_allowlist(cmap, claimed)
+                if e.get("term")
+            ]
+            rewritten = tailor_skills(enriched, jd_terms, allowed)
+            if rewritten:
+                enriched = rewritten
+        except Exception:
+            traceback.print_exc()
+
         merged = {
             "summary": legacy.get("summary", "") or resume_struct.summary,
             "bullets": bullets_per_job,
@@ -280,9 +329,15 @@ def _run_single(job_url_id: int) -> None:
         out_path = storage.generated_docx_path(batch.id, ju.id)
         apply_tailoring(src_docx, resume_struct, merged, out_path)
 
-        # 5. Final coverage on the rewritten doc
+        # 5. Final coverage on the rewritten doc. Re-run the adjacency proposer
+        # exactly as we did for the initial map (step 2) — otherwise the final
+        # score is measured on deterministic adjacency only (0.7x credit lost)
+        # while the initial score got the LLM-proposed bridges, making the
+        # before/after comparison apples-to-oranges and understating the lift.
         final_struct = parse_resume_from_path(out_path)
         final_cmap = build_coverage_map(spec, final_struct)
+        if config.FINAL_ADJACENCY:
+            final_cmap = propose_adjacencies(spec, final_cmap, final_struct)
         coverage_final = dict(final_cmap["summary"])
         coverage_final["covered_exact"] = [
             {"term": c["term"], "weight": c["weight"]}
@@ -308,6 +363,7 @@ def _run_single(job_url_id: int) -> None:
         ju.spec_json = json.dumps(spec)
         ju.status = STATUS_DONE
         ju.error_message = None
+        ju.fail_reason = None
         db.commit()
 
     except Exception as e:
@@ -316,7 +372,11 @@ def _run_single(job_url_id: int) -> None:
             ju = db.get(JobUrl, job_url_id)
             if ju is not None:
                 ju.status = STATUS_ERROR
-                ju.error_message = f"{type(e).__name__}: {e}"
+                ju.fail_reason = "processing_error"
+                ju.error_message = (
+                    f"Tailoring failed internally ({type(e).__name__}). "
+                    "This is a system error, not a problem with the posting — retry it."
+                )
                 db.commit()
         except Exception:
             pass
