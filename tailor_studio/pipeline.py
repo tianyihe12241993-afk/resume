@@ -24,7 +24,7 @@ from app.tailoring import (
     apply_tailoring,
     normalize_job_info,
     parse_resume_from_path,
-    tailor_resume,
+    tailor_summary,
     tailor_skills,
 )
 
@@ -283,16 +283,17 @@ def _run_single(job_url_id: int) -> None:
         for r in bullet_results:
             bullets_per_job[r["job_idx"]].append(r["final"])
 
-        # 4. Summary via legacy single-shot, plus skills reorder + enrich
-        legacy = tailor_resume(
+        # 4. Summary via a fast summary-ONLY call (the legacy full-resume
+        # single-shot generated the whole doc just for its summary — a big,
+        # slow output that hit the request timeout). Skills reorder + enrich
+        # follow.
+        tailored_summary = tailor_summary(
             resume_struct,
             {
                 "title": ju.title or "",
                 "company": ju.company or "",
-                "location": ju.location or "",
                 "description": jd_text,
             },
-            system_prompt=profile.tailor_prompt,
         )
 
         def _key(s):
@@ -343,7 +344,7 @@ def _run_single(job_url_id: int) -> None:
             traceback.print_exc()
 
         merged = {
-            "summary": legacy.get("summary", "") or resume_struct.summary,
+            "summary": tailored_summary or resume_struct.summary,
             "bullets": bullets_per_job,
             "skill_categories": [c for c, _ in enriched],
             "skill_items": [i for _, i in enriched],

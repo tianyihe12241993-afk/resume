@@ -665,6 +665,79 @@ _tailor_mem_cache: dict[str, dict] = {}
 _SKILLS_CACHE_DIR = config.DATA_DIR / "skills_cache"
 _skills_mem_cache: dict[str, list] = {}
 
+_SUMMARY_CACHE_DIR = config.DATA_DIR / "summary_cache"
+_summary_mem_cache: dict[str, str] = {}
+
+SUMMARY_SYSTEM = """You rewrite a candidate's resume SUMMARY (the opening 3-5 sentence profile) to align with a target job, staying 100% truthful to the candidate's actual experience.
+
+RULES:
+- 3-5 sentences, ~60-110 words, within +-20% of the original length.
+- Sentence 1: years of experience + role identity + the JD's DOMAIN signal (use the JD's domain word when it fits, e.g. fintech, healthtech, developer tools).
+- Sentence 2: 2-3 of the JD's top required technologies the candidate ACTUALLY has, tied to a real employer/project from the resume.
+- Sentence 3: most relevant recent work with scope (users / scale / latency / team).
+- Optional sentence 4: leadership / cross-functional signal if the JD values it and the candidate has it.
+- NEVER invent skills, employers, projects, metrics, or a domain the candidate doesn't have. No filler ("passionate about", "proven ability to").
+- Third-person, no "I"/"we"/"my"/"our". Do not name the target company or role.
+
+OUTPUT: emit ONLY the rewritten summary text — no label, no quotes, no XML, no explanation."""
+
+
+def tailor_summary(resume: ResumeStruct, job: dict) -> str:
+    """Fast, summary-ONLY rewrite (small output). Replaces using the legacy
+    full-resume single-shot just for its summary — that big generation was slow
+    enough to hit the request timeout. Returns the rewritten summary, or the
+    original on failure. Cached on disk by (summary, JD)."""
+    if not resume.has_summary or not (resume.summary or "").strip():
+        return ""
+    original = resume.summary.strip()
+    desc = (job.get("description") or "")[:12000]
+    cache_blob = json.dumps(
+        {"model": config.TAILOR_MODEL, "summary": original,
+         "title": job.get("title", ""), "company": job.get("company", ""), "desc": desc},
+        ensure_ascii=False, sort_keys=True,
+    )
+    cache_key = hashlib.sha256(cache_blob.encode("utf-8")).hexdigest()
+    cached = _summary_mem_cache.get(cache_key)
+    if cached is None:
+        path = _SUMMARY_CACHE_DIR / f"{cache_key}.json"
+        if path.exists():
+            try:
+                cached = json.loads(path.read_text(encoding="utf-8")).get("summary")
+                if cached is not None:
+                    _summary_mem_cache[cache_key] = cached
+            except (OSError, json.JSONDecodeError):
+                cached = None
+    if cached is not None:
+        return cached or original
+
+    user = (
+        f"CANDIDATE SUMMARY (rewrite this):\n{original}\n\n"
+        f"TARGET JOB:\nTitle: {job.get('title','')}\nCompany: {job.get('company','')}\n\n"
+        f"Description:\n{desc}\n\n"
+        "Rewrite the summary to align with this job, 100% truthfully. Output only the summary."
+    )
+    try:
+        resp = _client().messages.create(
+            model=config.TAILOR_MODEL,
+            max_tokens=400,
+            temperature=0,
+            system=SUMMARY_SYSTEM,
+            messages=[{"role": "user", "content": user}],
+        )
+        txt = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+        txt = txt.strip().strip('"').strip()
+        out = txt or original
+        try:
+            _SUMMARY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            (_SUMMARY_CACHE_DIR / f"{cache_key}.json").write_text(
+                json.dumps({"summary": out}, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+        _summary_mem_cache[cache_key] = out
+        return out
+    except Exception:
+        return original
+
 
 def tailor_resume(
     resume: ResumeStruct, job: dict, *, system_prompt: Optional[str] = None
