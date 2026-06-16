@@ -9,7 +9,7 @@ import shutil
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl, urlencode
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field
@@ -692,47 +692,95 @@ def _queue_urls_for_profile(
     return result
 
 
+# Query params that identify *how the user arrived* at a posting, not *which*
+# posting it is. Stripped before dedup so the same job pasted from different
+# aggregators / with different tracking tags is recognized as one. Identity
+# params (greenhouse `token`/`gh_jid`, ADP `jobId`, Lever ids, etc.) are kept.
+_TRACKING_PARAMS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_id", "utm_name", "gclid", "fbclid", "msclkid", "yclid", "mc_cid",
+    "mc_eid", "igshid", "ref", "ref_src", "referrer", "source", "src", "spm",
+    "trk", "trkcampaign", "gh_src", "lever-source", "lever-origin", "_hsenc",
+    "_hsmi", "vero_id", "cid",
+}
+
+
+def _normalize_url(url: str) -> str:
+    """Canonical form of a job URL for DEDUP COMPARISON ONLY (the original URL
+    is what gets stored/fetched). Lowercases scheme+host, drops `www.`, a
+    trailing slash, the fragment, and tracking query params, and sorts the
+    remaining (identity-bearing) params so order doesn't matter."""
+    try:
+        s = urlsplit(url.strip())
+        scheme = (s.scheme or "https").lower()
+        netloc = s.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        kept = [
+            (k, v) for (k, v) in parse_qsl(s.query, keep_blank_values=True)
+            if k.lower() not in _TRACKING_PARAMS and not k.lower().startswith("utm_")
+        ]
+        kept.sort()
+        path = s.path.rstrip("/") or "/"
+        return urlunsplit((scheme, netloc, path, urlencode(kept), ""))
+    except Exception:
+        return (url or "").strip()
+
+
 def _queue_cleaned_urls(db: Session, p, raw_urls, cleaned) -> dict:
 
-    # Skip any URL that already exists for this profile in ANY status. Most
-    # of the time these are duplicates the user pasted again by mistake; but
-    # for reposted jobs they may want to re-apply, so the response surfaces
-    # each existing row's last-applied info so the UI can make that visible.
+    # Skip any URL that already exists for this profile in ANY status — compared
+    # on the NORMALIZED form, so the same job pasted with different tracking tags
+    # is caught. We keep the original URL on each row (extension URL-matching is
+    # unaffected); normalization is comparison-only. Reposted jobs they may want
+    # to re-apply to are surfaced with their last-applied info.
     rows = (
         db.query(JobUrl, Batch)
         .join(Batch, JobUrl.batch_id == Batch.id)
-        .filter(
-            Batch.profile_id == p.id,
-            JobUrl.url.in_(cleaned),
-        )
+        .filter(Batch.profile_id == p.id)
         .all()
     )
-    existing_urls: set[str] = set()
+    existing_norm: dict[str, tuple] = {}
+    for (j, b) in rows:
+        existing_norm.setdefault(_normalize_url(j.url), (j, b))
+
+    existing_urls: set[str] = set()          # normalized hits (for counts)
     existing_by_status: dict[str, set[str]] = {}
     duplicates: list[dict] = []
+    todo_urls: list[str] = []
+    batch_seen: set[str] = set()
     now_utc = datetime.now(timezone.utc)
-    for (j, b) in rows:
-        existing_urls.add(j.url)
-        existing_by_status.setdefault(j.status, set()).add(j.url)
-        days_since_applied = None
-        if j.applied_at:
-            applied = j.applied_at
-            if applied.tzinfo is None:
-                applied = applied.replace(tzinfo=timezone.utc)
-            days_since_applied = int((now_utc - applied).total_seconds() // 86400)
-        duplicates.append({
-            "url": j.url,
-            "job_id": j.id,
-            "batch_id": b.id,
-            "status": j.status,
-            "application_status": j.application_status,
-            "applied_at": _iso(j.applied_at),
-            "days_since_applied": days_since_applied,
-            "apply_count": j.apply_count or 0,
-            "company": j.company,
-            "title": j.title,
-        })
-    todo_urls = [u for u in cleaned if u not in existing_urls]
+    for u in cleaned:
+        nu = _normalize_url(u)
+        hit = existing_norm.get(nu)
+        if hit is not None:
+            j, b = hit
+            existing_by_status.setdefault(j.status, set()).add(nu)
+            if nu not in existing_urls:
+                existing_urls.add(nu)
+                days_since_applied = None
+                if j.applied_at:
+                    applied = j.applied_at
+                    if applied.tzinfo is None:
+                        applied = applied.replace(tzinfo=timezone.utc)
+                    days_since_applied = int((now_utc - applied).total_seconds() // 86400)
+                duplicates.append({
+                    "url": j.url,
+                    "job_id": j.id,
+                    "batch_id": b.id,
+                    "status": j.status,
+                    "application_status": j.application_status,
+                    "applied_at": _iso(j.applied_at),
+                    "days_since_applied": days_since_applied,
+                    "apply_count": j.apply_count or 0,
+                    "company": j.company,
+                    "title": j.title,
+                })
+            continue
+        if nu in batch_seen:
+            continue  # same job twice in this paste (e.g. different utm tags)
+        batch_seen.add(nu)
+        todo_urls.append(u)
     if not todo_urls:
         n_done    = len(existing_by_status.get(STATUS_DONE, set()))
         n_other   = len(existing_urls) - n_done
