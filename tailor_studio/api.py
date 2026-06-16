@@ -262,12 +262,10 @@ def api_dashboard(
     db: Session = Depends(get_db),
     user=Depends(auth.require_user),
 ):
-    profiles = (
-        db.query(Profile)
-        .filter(Profile.id.in_(_accessible_pids(db, user)))
-        .order_by(Profile.created_at.asc())
-        .all()
-    )
+    # Show every profile (team-wide work overview); `can_access` controls whether
+    # the viewer can open/act on each one.
+    profiles = db.query(Profile).order_by(Profile.created_at.asc()).all()
+    accessible = _accessible_pids(db, user)
     today = _today_pst()
     today_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=8)
     today_end = today_start + timedelta(days=1)
@@ -339,6 +337,7 @@ def api_dashboard(
                 "name": p.name,
                 "has_base_resume": bool(p.base_resume_filename)
                                     and storage.base_resume_path(p.id).exists(),
+                "can_access": p.id in accessible,
             },
             "today_batch": {"id": today_batch.id, "created_at": _iso(today_batch.created_at)}
                             if today_batch else None,

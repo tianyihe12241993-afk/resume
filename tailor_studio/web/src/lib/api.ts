@@ -123,7 +123,7 @@ export interface BatchSummary {
 }
 
 export interface ProfileStatus {
-  profile: { id: number; name: string; has_base_resume: boolean }
+  profile: { id: number; name: string; has_base_resume: boolean; can_access?: boolean }
   today_batch: { id: number; created_at: string } | null
   summary: BatchSummary    // today only
   week: BatchSummary       // last 7 PT days

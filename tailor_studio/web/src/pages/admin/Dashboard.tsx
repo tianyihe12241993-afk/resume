@@ -7,7 +7,7 @@ import { Avatar, MiniDonut, StatTile, WeekHeatmap, paletteForName } from '@/comp
 import { formatLongDate } from '@/lib/format'
 import {
   ArrowRight, Target, CheckCircle2, Sparkles, TrendingUp,
-  Plus, Upload, AlertCircle,
+  Plus, Upload, AlertCircle, Lock,
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -308,15 +308,16 @@ function TodayCard({
   onStart: () => void
 }) {
   const { profile, summary, today_batch } = status
+  const canAccess = profile.can_access !== false
   const hit = summary.done > 0 && summary.applied >= summary.done
   const hasTodayBatch = today_batch !== null
   const pct = summary.done > 0 ? Math.round((summary.applied / summary.done) * 100) : 0
 
   const Wrapper = ({ children }: { children: React.ReactNode }) =>
-    hasTodayBatch ? (
+    hasTodayBatch && canAccess ? (
       <Link to={`/admin/batches/${today_batch!.id}`} className="card card-hover block p-3.5">{children}</Link>
     ) : (
-      <div className="card p-3.5">{children}</div>
+      <div className={clsx('card p-3.5', !canAccess && 'opacity-70')}>{children}</div>
     )
 
   return (
@@ -326,6 +327,7 @@ function TodayCard({
         <div className="flex items-center gap-2 min-w-0">
           <Avatar name={profile.name} size={32} />
           <p className="font-semibold text-gray-900 truncate text-sm">{profile.name}</p>
+          {!canAccess && <Lock className="w-3 h-3 text-gray-400 shrink-0" />}
         </div>
         {hit && <CheckCircle2 className="w-4 h-4 text-green-600 flex-shrink-0" />}
       </div>
@@ -367,7 +369,9 @@ function TodayCard({
         </div>
       )}
 
-      {profile.has_base_resume ? (
+      {!canAccess ? (
+        <p className="text-[11px] text-gray-400 text-center py-1.5">View only — not assigned to you</p>
+      ) : profile.has_base_resume ? (
         <button
           onClick={(e) => { e.preventDefault(); e.stopPropagation(); onStart() }}
           className="btn-primary w-full text-xs py-1.5"
@@ -450,6 +454,7 @@ function WeekRow({
   onStart: () => void
 }) {
   const { profile, week, trend, today_batch } = status
+  const canAccess = profile.can_access !== false
   const hit = week.done > 0 && week.applied >= week.done
   const appliedPct = week.done > 0 ? Math.round((week.applied / week.done) * 100) : 0
   const tailoredPct = week.total > 0 ? Math.round((week.done / week.total) * 100) : 0
@@ -467,15 +472,23 @@ function WeekRow({
         <div className="flex items-center gap-2.5 min-w-0">
           <Avatar name={profile.name} size={36} />
           <div className="min-w-0">
-            <Link to={`/admin/profiles/${profile.id}`}
-                  className="font-semibold text-gray-900 hover:text-brand-700 truncate block">
-              {profile.name}
-            </Link>
-            {today_batch ? (
+            {canAccess ? (
+              <Link to={`/admin/profiles/${profile.id}`}
+                    className="font-semibold text-gray-900 hover:text-brand-700 truncate block">
+                {profile.name}
+              </Link>
+            ) : (
+              <span className="font-semibold text-gray-900 truncate flex items-center gap-1">
+                {profile.name} <Lock className="w-3 h-3 text-gray-400" />
+              </span>
+            )}
+            {today_batch && canAccess ? (
               <Link to={`/admin/batches/${today_batch.id}`}
                     className="text-[11px] text-gray-400 hover:text-brand-700 truncate block">
                 today: batch #{today_batch.id} →
               </Link>
+            ) : today_batch ? (
+              <p className="text-[11px] text-gray-400 truncate">today: batch #{today_batch.id}</p>
             ) : !profile.has_base_resume ? (
               <p className="text-[11px] text-amber-600 truncate">No base resume</p>
             ) : (
@@ -544,7 +557,9 @@ function WeekRow({
 
       {/* action */}
       <td className="px-3 py-3 text-right">
-        {profile.has_base_resume ? (
+        {!canAccess ? (
+          <span className="text-[11px] text-gray-300">view only</span>
+        ) : profile.has_base_resume ? (
           <button onClick={onStart} className="btn-primary text-xs py-1.5 px-2.5 whitespace-nowrap">
             <Plus className="w-3.5 h-3.5" /> Add URLs
           </button>
