@@ -101,6 +101,27 @@ def api_logout(response: Response):
     return {"ok": True}
 
 
+class NameIn(BaseModel):
+    name: str
+
+
+@router.post("/me/name")
+def api_set_name(body: NameIn, db: Session = Depends(get_db), me=Depends(auth.require_user)):
+    """Member sets their own username (chat display + @mention). Restricted to
+    mention-friendly characters so @name keeps working."""
+    import re as _re
+    name = (body.name or "").strip()
+    if not (2 <= len(name) <= 32) or not _re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        raise HTTPException(400, "Use 2–32 chars: letters, numbers, . _ - (no spaces).")
+    u = db.get(User, me.id)
+    u.display_name = name
+    # Reflect the new name on this member's existing chat messages too.
+    db.query(ChatMessage).filter(ChatMessage.user_id == u.id).update(
+        {ChatMessage.sender_name: name}, synchronize_session=False)
+    db.commit()
+    return {"name": _uname(u)}
+
+
 @public_router.get("/me")
 def api_me(request: Request):
     user = auth.current_user(request)
@@ -109,7 +130,7 @@ def api_me(request: Request):
     return {
         "id": user.id,
         "email": user.email,
-        "name": user.email.split("@")[0],
+        "name": _uname(user),
         "role": "user",
         "is_admin": bool(getattr(user, "is_admin", False)),
         "approved": bool(getattr(user, "approved", False)),
@@ -126,6 +147,11 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
+
+
+def _uname(u: User) -> str:
+    """A member's display name: chosen username, else the email local-part."""
+    return (u.display_name or "").strip() or u.email.split("@")[0]
 
 
 def _profile_out(p: Profile) -> dict:
@@ -1418,7 +1444,7 @@ def api_chat_history(
         .order_by(ChatMessage.id.desc()).all()
     )
     return {
-        "me": {"id": me.id, "name": me.email.split("@")[0], "is_admin": bool(me.is_admin)},
+        "me": {"id": me.id, "name": _uname(me), "is_admin": bool(me.is_admin)},
         "gif_enabled": bool(config.GIPHY_API_KEY),
         "messages": [
             {
@@ -1468,14 +1494,14 @@ def api_chat_members(db: Session = Depends(get_db), me=Depends(auth.require_user
     """Approved members, for the @mention autocomplete. Includes a synthetic
     'all' entry for mentioning everyone."""
     users = db.query(User).filter(User.approved == True).order_by(User.email).all()  # noqa: E712
-    return {"members": [{"id": u.id, "name": u.email.split("@")[0]} for u in users]}
+    return {"members": [{"id": u.id, "name": _uname(u)} for u in users]}
 
 
 # ───────────────── members (admin approval) ─────────────────
 
 def _member_out(u: User) -> dict:
     return {
-        "id": u.id, "email": u.email, "name": u.email.split("@")[0],
+        "id": u.id, "email": u.email, "name": _uname(u),
         "approved": bool(u.approved), "is_admin": bool(u.is_admin),
         "created_at": _iso(u.created_at),
     }

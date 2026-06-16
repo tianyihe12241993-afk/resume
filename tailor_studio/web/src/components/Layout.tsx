@@ -2,10 +2,10 @@ import { useState } from 'react'
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, FolderKanban, Calendar as CalendarIcon, Search, LogOut,
-  MessageSquare, ClipboardList, MessagesSquare, UserCheck,
+  MessageSquare, ClipboardList, MessagesSquare, UserCheck, Pencil, Check, X,
 } from 'lucide-react'
 import clsx from 'clsx'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useAuth, useLogout } from '@/hooks/useAuth'
 import { useChatNotifications } from '@/hooks/useChatNotifications'
@@ -50,6 +50,15 @@ export default function Layout() {
   useEffect(() => {
     document.title = chatUnread > 0 ? `(${chatUnread}) Tailor Studio` : 'Tailor Studio'
   }, [chatUnread])
+
+  // Username editing (every member can set their own).
+  const qc = useQueryClient()
+  const [editName, setEditName] = useState(false)
+  const [nameVal, setNameVal] = useState('')
+  const saveName = useMutation({
+    mutationFn: (name: string) => api.post('/api/me/name', { name }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['me'] }); setEditName(false) },
+  })
   const onSearch = (e: React.FormEvent) => {
     e.preventDefault()
     if (q.trim()) {
@@ -121,11 +130,35 @@ export default function Layout() {
 
         <div className="border-t border-slate-200 p-3">
           {user && (
-            <div className="flex items-center gap-2 px-2 py-1.5 mb-1 rounded-md hover:bg-slate-50">
-              <Avatar name={user.email} size={28} />
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium text-gray-800 truncate">{user.email}</p>
-              </div>
+            <div className="px-2 py-1.5 mb-1 rounded-md">
+              {editName ? (
+                <form className="flex items-center gap-1"
+                      onSubmit={(e) => { e.preventDefault(); const v = nameVal.trim(); if (v) saveName.mutate(v) }}>
+                  <input autoFocus value={nameVal} maxLength={32}
+                         onChange={(e) => setNameVal(e.target.value)}
+                         onKeyDown={(e) => { if (e.key === 'Escape') setEditName(false) }}
+                         placeholder="username"
+                         className="input text-xs py-1 flex-1 min-w-0" />
+                  <button className="text-green-600 hover:text-green-700 p-1" title="Save"><Check className="w-3.5 h-3.5" /></button>
+                  <button type="button" onClick={() => setEditName(false)} className="text-gray-400 hover:text-gray-600 p-1"><X className="w-3.5 h-3.5" /></button>
+                </form>
+              ) : (
+                <div className="flex items-center gap-2 group">
+                  <Avatar name={user.name || user.email} size={28} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-gray-800 truncate">{user.name || user.email.split('@')[0]}</p>
+                    <p className="text-[10px] text-gray-400 truncate">{user.email}</p>
+                  </div>
+                  <button onClick={() => { setNameVal(user.name || ''); setEditName(true) }}
+                          title="Edit username"
+                          className="text-gray-300 hover:text-brand-600 transition opacity-0 group-hover:opacity-100">
+                    <Pencil className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+              {saveName.isError && (
+                <p className="text-[10px] text-red-600 mt-1">{(saveName.error as Error).message}</p>
+              )}
             </div>
           )}
           <button

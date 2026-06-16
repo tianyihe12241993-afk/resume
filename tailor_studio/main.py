@@ -47,7 +47,7 @@ async def chat_ws(websocket: WebSocket):
         if user is None or not user.approved:
             await websocket.close(code=1008)
             return
-        name = chat.display_name(user.email)
+        name = chat.display_name(user.email, user.display_name)
     finally:
         db.close()
 
@@ -143,7 +143,9 @@ async def chat_ws(websocket: WebSocket):
             reply_to_id = int(reply_to_id) if isinstance(reply_to_id, int) else None
             db = get_session()
             try:
-                m = chat.save_message(db, uid, name, body[:4000], reply_to_id=reply_to_id)
+                u = db.get(User, uid)
+                nm = chat.display_name(u.email, u.display_name) if u else name
+                m = chat.save_message(db, uid, nm, body[:4000], reply_to_id=reply_to_id)
                 payload = chat.message_payload(m, chat.reply_snippet(db, m.reply_to_id))
             finally:
                 db.close()

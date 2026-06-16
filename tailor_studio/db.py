@@ -36,6 +36,9 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Member-chosen username (chat display + @mention). Falls back to the email
+    # local-part when unset.
+    display_name: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     # JSON blob with the user's standard form-fill answers (personal info,
     # eligibility yes/no, etc.). Used by the extension's "Fill form" button.
     answer_library_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -273,6 +276,8 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE user ADD COLUMN approved BOOLEAN NOT NULL DEFAULT 0"))
             # Pre-existing accounts predate the approval gate — keep them in.
             conn.execute(text("UPDATE user SET approved = 1"))
+        if "display_name" not in user_cols:
+            conn.execute(text("ALTER TABLE user ADD COLUMN display_name VARCHAR(32)"))
         # chat_message.reply_to_id (added after the table shipped)
         cm_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(chat_message)"))}
         if cm_cols and "reply_to_id" not in cm_cols:
