@@ -553,8 +553,8 @@ async def api_upload_resume(
     db: Session = Depends(get_db),
     user=Depends(auth.require_user),
 ):
-    if not user.is_admin:
-        raise HTTPException(403, "Only the admin can set the base resume.")
+    # Owner, admin, or an assigned bidder may set the base resume — _user_profile
+    # enforces access (404 for anyone without owner/grant access to this profile).
     p = _user_profile(db, user, pid)
     if not file.filename or not file.filename.lower().endswith(".docx"):
         raise HTTPException(400, "Upload a .docx file.")

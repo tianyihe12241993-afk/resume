@@ -141,16 +141,16 @@ export default function ProfileDetailPage() {
             </div>
           )}
 
-          {isAdmin && (<>
-            <input ref={fileRef} type="file" accept=".docx" className="hidden"
-                   onChange={(e) => { const f = e.target.files?.[0]; if (f) upload.mutate(f) }} />
-            <button onClick={() => fileRef.current?.click()} disabled={upload.isPending}
-                    className="btn-secondary text-sm w-full">
-              <Upload className="w-4 h-4" />
-              {upload.isPending ? 'Uploading…' : profile.has_base_resume ? 'Replace .docx' : 'Upload .docx'}
-            </button>
-            {upload.isError && <div className="mt-2"><Alert variant="error">{(upload.error as Error).message}</Alert></div>}
-          </>)}
+          {/* Owner, admin, or an assigned bidder can set the base resume — the
+              page only loads for profiles the viewer can access. */}
+          <input ref={fileRef} type="file" accept=".docx" className="hidden"
+                 onChange={(e) => { const f = e.target.files?.[0]; if (f) upload.mutate(f) }} />
+          <button onClick={() => fileRef.current?.click()} disabled={upload.isPending}
+                  className="btn-secondary text-sm w-full">
+            <Upload className="w-4 h-4" />
+            {upload.isPending ? 'Uploading…' : profile.has_base_resume ? 'Replace .docx' : 'Upload .docx'}
+          </button>
+          {upload.isError && <div className="mt-2"><Alert variant="error">{(upload.error as Error).message}</Alert></div>}
         </div>
       </div>
 
