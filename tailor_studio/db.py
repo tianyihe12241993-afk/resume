@@ -225,6 +225,22 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
 
 
+class ProfileAccess(Base):
+    """Admin-granted access: lets a bidder (user) see/work on a profile they
+    don't own. A user can access a profile if they own it OR a row here links
+    them to it."""
+    __tablename__ = "profile_access"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profile.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 _engine = create_engine(
     f"sqlite:///{config.DB_PATH}",
     connect_args={"check_same_thread": False},

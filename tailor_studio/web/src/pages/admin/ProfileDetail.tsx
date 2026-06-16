@@ -2,12 +2,13 @@ import { useState, useRef, useEffect } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  ChevronLeft, Check, TriangleAlert, Copy,
-  Upload, FileText, Pencil, Trash2, KeyRound, Mail, AlertOctagon, Wand2,
+  ChevronLeft, Check, TriangleAlert,
+  Upload, FileText, Pencil, Trash2, AlertOctagon, Wand2, UsersRound,
 } from 'lucide-react'
 import { api, type ProfileDetail } from '@/lib/api'
 import { Alert } from '@/components/ui'
 import { Avatar } from '@/components/charts'
+import { useAuth } from '@/hooks/useAuth'
 import { formatDateTime } from '@/lib/format'
 
 export default function ProfileDetailPage() {
@@ -22,16 +23,16 @@ export default function ProfileDetailPage() {
     queryFn: () => api.get<ProfileDetail>(`/api/admin/profiles/${pid}`),
   })
 
+  const { data: me } = useAuth()
+  const isAdmin = !!me?.is_admin
+
   const [editingName, setEditingName] = useState(false)
   const [name, setName] = useState('')
   useEffect(() => {
     if (data) setName(data.profile.name)
   }, [data])
 
-  const [accessName, setAccessName] = useState('')
-  const [accessEmail, setAccessEmail] = useState('')
   const [urls, setUrls] = useState('')
-  const [copied, setCopied] = useState<number | null>(null)
 
   // Tailor prompt state
   const [prompt, setPrompt] = useState('')
@@ -58,22 +59,6 @@ export default function ProfileDetailPage() {
     mutationFn: (f: File) => api.upload(`/api/admin/profiles/${pid}/resume`, f),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/profile', pid] }),
   })
-  const grant = useMutation({
-    mutationFn: () => api.post(`/api/admin/profiles/${pid}/access`,
-      { email: accessEmail, name: accessName || null }),
-    onSuccess: () => {
-      setAccessEmail(''); setAccessName('')
-      qc.invalidateQueries({ queryKey: ['admin/profile', pid] })
-    },
-  })
-  const revoke = useMutation({
-    mutationFn: (aid: number) => api.post(`/api/admin/profiles/${pid}/access/${aid}/revoke`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/profile', pid] }),
-  })
-  const resetInvite = useMutation({
-    mutationFn: (uid: number) => api.post(`/api/admin/users/${uid}/reset-invite`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/profile', pid] }),
-  })
   const startBatch = useMutation({
     mutationFn: () => api.post<{ batch_id: number | null }>(
       '/api/admin/batches', { profile_id: pid, urls }),
@@ -89,7 +74,7 @@ export default function ProfileDetailPage() {
   })
 
   if (!data) return <div className="text-center text-gray-400 text-sm">Loading…</div>
-  const { profile, accesses, batches } = data
+  const { profile, batches } = data
 
   const nameDirty = name.trim() && name.trim() !== profile.name
 
@@ -121,11 +106,13 @@ export default function ProfileDetailPage() {
           ) : (
             <div className="flex items-center gap-2 group">
               <h1 className="text-2xl font-bold text-gray-900">{profile.name}</h1>
-              <button onClick={() => setEditingName(true)}
-                      title="Rename profile"
-                      className="text-gray-400 hover:text-brand-600 transition">
-                <Pencil className="w-4 h-4" />
-              </button>
+              {isAdmin && (
+                <button onClick={() => setEditingName(true)}
+                        title="Rename profile"
+                        className="text-gray-400 hover:text-brand-600 transition">
+                  <Pencil className="w-4 h-4" />
+                </button>
+              )}
             </div>
           )}
           <p className="text-xs text-gray-400 mt-1">
@@ -154,18 +141,21 @@ export default function ProfileDetailPage() {
             </div>
           )}
 
-          <input ref={fileRef} type="file" accept=".docx" className="hidden"
-                 onChange={(e) => { const f = e.target.files?.[0]; if (f) upload.mutate(f) }} />
-          <button onClick={() => fileRef.current?.click()} disabled={upload.isPending}
-                  className="btn-secondary text-sm w-full">
-            <Upload className="w-4 h-4" />
-            {upload.isPending ? 'Uploading…' : profile.has_base_resume ? 'Replace .docx' : 'Upload .docx'}
-          </button>
-          {upload.isError && <div className="mt-2"><Alert variant="error">{(upload.error as Error).message}</Alert></div>}
+          {isAdmin && (<>
+            <input ref={fileRef} type="file" accept=".docx" className="hidden"
+                   onChange={(e) => { const f = e.target.files?.[0]; if (f) upload.mutate(f) }} />
+            <button onClick={() => fileRef.current?.click()} disabled={upload.isPending}
+                    className="btn-secondary text-sm w-full">
+              <Upload className="w-4 h-4" />
+              {upload.isPending ? 'Uploading…' : profile.has_base_resume ? 'Replace .docx' : 'Upload .docx'}
+            </button>
+            {upload.isError && <div className="mt-2"><Alert variant="error">{(upload.error as Error).message}</Alert></div>}
+          </>)}
         </div>
       </div>
 
-      {/* ── Tailoring prompt ──────────────────────────────────────── */}
+      {/* ── Tailoring prompt (admin) ──────────────────────────────── */}
+      {isAdmin && (
       <div className="card p-5 mb-6">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
@@ -226,83 +216,10 @@ export default function ProfileDetailPage() {
           <div className="mt-2"><Alert variant="error">{(saveProfile.error as Error).message}</Alert></div>
         )}
       </div>
-
-      {/* Bidder access section — disabled in studio (single-user). */}
-      {false && (
-      <div className="card p-5 mb-6">
-        <h2 className="text-base font-semibold text-gray-900 mb-1">Bidder access</h2>
-        <p className="text-xs text-gray-400 mb-4">
-          Grant a bidder access to this profile. They'll get a setup link to set a password.
-        </p>
-
-        <form className="grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-2 mb-5"
-              onSubmit={(e) => { e.preventDefault(); if (accessEmail) grant.mutate() }}>
-          <input placeholder="Bidder name (optional)" className="input"
-                 value={accessName} onChange={(e) => setAccessName(e.target.value)} />
-          <input type="email" required placeholder="bidder@email.com" className="input"
-                 value={accessEmail} onChange={(e) => setAccessEmail(e.target.value)} />
-          <button disabled={grant.isPending} className="btn-primary text-sm whitespace-nowrap">
-            {grant.isPending ? 'Granting…' : '+ Grant access'}
-          </button>
-        </form>
-
-        {accesses.length > 0 ? (
-          <ul className="divide-y divide-slate-100 -mx-5">
-            {accesses.map((a) => (
-              <li key={a.id} className="px-5 py-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-3 min-w-0 flex-1">
-                    <span className="w-8 h-8 rounded-full bg-brand-100 text-brand-700 text-xs font-semibold grid place-items-center shrink-0">
-                      {((a.user.name || a.user.email)[0] || '?').toUpperCase()}
-                    </span>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <Link to={`/admin/bidders/${a.user.id}`}
-                              className="font-medium text-sm hover:underline text-gray-900">
-                          {a.user.name || a.user.email}
-                        </Link>
-                        {!a.user.password_set && <span className="chip chip-needs_manual_jd">pending setup</span>}
-                      </div>
-                      {a.user.name && (
-                        <p className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
-                          <Mail className="w-3 h-3" /> {a.user.email}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <button onClick={() => resetInvite.mutate(a.user.id)}
-                            title="Reset invite"
-                            className="p-1.5 text-gray-400 hover:text-brand-600 hover:bg-brand-50 rounded transition">
-                      <KeyRound className="w-3.5 h-3.5" />
-                    </button>
-                    <button onClick={() => confirm(`Revoke access for ${a.user.name || a.user.email}?`) && revoke.mutate(a.id)}
-                            title="Revoke"
-                            className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition">
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-                {a.invite_url && (
-                  <div className="mt-2 ml-11 flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
-                    <input readOnly value={a.invite_url}
-                           className="flex-1 bg-transparent text-xs text-amber-900 font-mono min-w-0" />
-                    <button onClick={() => {
-                      navigator.clipboard.writeText(a.invite_url!)
-                      setCopied(a.user.id); setTimeout(() => setCopied(null), 1200)
-                    }} className="text-[11px] bg-amber-600 text-white rounded px-2 py-0.5 shrink-0 hover:bg-amber-700 transition flex items-center gap-1">
-                      <Copy className="w-3 h-3" /> {copied === a.user.id ? 'Copied!' : 'Copy link'}
-                    </button>
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-gray-400 text-center py-4">No bidders yet.</p>
-        )}
-      </div>
       )}
+
+      {/* ── Assign to bidders (admin) ─────────────────────────────── */}
+      {isAdmin && <BidderAccessCard pid={pid} />}
 
       {/* ── New batch ─────────────────────────────────────────────── */}
       <div className="card p-5 mb-6">
@@ -342,7 +259,8 @@ export default function ProfileDetailPage() {
         )}
       </div>
 
-      {/* ── Danger zone ───────────────────────────────────────────── */}
+      {/* ── Danger zone (admin) ───────────────────────────────────── */}
+      {isAdmin && (
       <div className="border border-red-200 rounded-xl p-5 bg-red-50/40">
         <div className="flex items-start gap-3">
           <AlertOctagon className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
@@ -368,6 +286,57 @@ export default function ProfileDetailPage() {
           </button>
         </div>
       </div>
+      )}
     </>
+  )
+}
+
+// ── Admin: assign this profile to bidders ────────────────────────────────────
+interface BidderRow { id: number; name: string; email: string; has_access: boolean }
+function BidderAccessCard({ pid }: { pid: number }) {
+  const qc = useQueryClient()
+  const { data } = useQuery({
+    queryKey: ['admin/profile-access', pid],
+    queryFn: () => api.get<{ bidders: BidderRow[] }>(`/api/admin/profiles/${pid}/access`),
+  })
+  const setAccess = useMutation({
+    mutationFn: ({ uid, granted }: { uid: number; granted: boolean }) =>
+      api.post(`/api/admin/profiles/${pid}/access/${uid}`, { granted }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/profile-access', pid] }),
+  })
+
+  const bidders = data?.bidders ?? []
+  return (
+    <div className="card p-5 mb-6">
+      <div className="flex items-center gap-2 mb-1">
+        <UsersRound className="w-4 h-4 text-brand-500" />
+        <h2 className="text-base font-semibold text-gray-900">Assign to bidders</h2>
+      </div>
+      <p className="text-xs text-gray-400 mb-4">
+        Toggle which bidders can see and work on this profile. They only see profiles you assign.
+      </p>
+      {bidders.length === 0 ? (
+        <p className="text-sm text-gray-400">No approved bidders yet — approve some on the Members page.</p>
+      ) : (
+        <ul className="divide-y divide-slate-100 -mx-5">
+          {bidders.map((b) => (
+            <li key={b.id} className="px-5 py-2.5 flex items-center gap-3">
+              <Avatar name={b.name} size={28} />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-gray-800 truncate">{b.name}</p>
+                <p className="text-xs text-gray-400 truncate">{b.email}</p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" className="sr-only peer" checked={b.has_access}
+                       disabled={setAccess.isPending}
+                       onChange={(e) => setAccess.mutate({ uid: b.id, granted: e.target.checked })} />
+                <div className="w-9 h-5 bg-slate-200 rounded-full peer peer-checked:bg-brand-600 transition" />
+                <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full transition peer-checked:translate-x-4" />
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   )
 }

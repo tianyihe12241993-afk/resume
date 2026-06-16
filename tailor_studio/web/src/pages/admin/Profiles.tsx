@@ -5,9 +5,12 @@ import { ChevronRight, Pencil, Trash2, Check, X, FileCheck, FileWarning } from '
 import { api, type Profile } from '@/lib/api'
 import { Empty } from '@/components/ui'
 import { Avatar } from '@/components/charts'
+import { useAuth } from '@/hooks/useAuth'
 
 export default function Profiles() {
   const qc = useQueryClient()
+  const { data: me } = useAuth()
+  const isAdmin = !!me?.is_admin
   const { data, isLoading } = useQuery({
     queryKey: ['admin/profiles'],
     queryFn: () => api.get<{ profiles: Profile[] }>('/api/admin/profiles'),
@@ -30,27 +33,29 @@ export default function Profiles() {
             Profiles <span className="text-gray-400 font-normal text-base">({profiles.length})</span>
           </h1>
         </div>
-        <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (name.trim()) create.mutate() }}>
-          <input required className="input" placeholder="New profile name…"
-                 value={name} onChange={(e) => setName(e.target.value)} />
-          <button disabled={create.isPending} className="btn-primary shrink-0 whitespace-nowrap">
-            {create.isPending ? 'Creating…' : '+ Create'}
-          </button>
-        </form>
+        {isAdmin && (
+          <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (name.trim()) create.mutate() }}>
+            <input required className="input" placeholder="New profile name…"
+                   value={name} onChange={(e) => setName(e.target.value)} />
+            <button disabled={create.isPending} className="btn-primary shrink-0 whitespace-nowrap">
+              {create.isPending ? 'Creating…' : '+ Create'}
+            </button>
+          </form>
+        )}
       </div>
 
       {profiles.length > 0 ? (
         <ul className="card divide-y divide-slate-100 overflow-hidden">
-          {profiles.map((p) => <ProfileRow key={p.id} profile={p} />)}
+          {profiles.map((p) => <ProfileRow key={p.id} profile={p} isAdmin={isAdmin} />)}
         </ul>
       ) : (
-        <Empty>No profiles yet. Create one above to get started.</Empty>
+        <Empty>{isAdmin ? 'No profiles yet. Create one above to get started.' : 'No profiles assigned to you yet. Ask your admin for access.'}</Empty>
       )}
     </>
   )
 }
 
-function ProfileRow({ profile }: { profile: Profile }) {
+function ProfileRow({ profile, isAdmin }: { profile: Profile; isAdmin: boolean }) {
   const qc = useQueryClient()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(profile.name)
@@ -123,6 +128,7 @@ function ProfileRow({ profile }: { profile: Profile }) {
         </div>
       </Link>
       <div className="flex items-center gap-1 shrink-0 ml-3">
+        {isAdmin && (<>
         <button
           onClick={() => { setDraft(profile.name); setEditing(true) }}
           className="p-2 text-gray-400 hover:text-brand-600 hover:bg-brand-50 rounded-md transition"
@@ -138,6 +144,7 @@ function ProfileRow({ profile }: { profile: Profile }) {
           className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-md transition"
           title="Delete profile"
         ><Trash2 className="w-4 h-4" /></button>
+        </>)}
         <Link
           to={`/admin/profiles/${profile.id}`}
           className="p-2 text-gray-300 hover:text-gray-600 hover:bg-slate-100 rounded-md transition"

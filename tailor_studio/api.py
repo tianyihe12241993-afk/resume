@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from . import auth, config, pipeline, storage
 from .db import (
-    Batch, CalendarEvent, ChatMessage, JobUrl, Profile, User, get_db,
+    Batch, CalendarEvent, ChatMessage, JobUrl, Profile, ProfileAccess, User, get_db,
     APP_STATUSES, STATUS_DONE, STATUS_ERROR, STATUS_NEEDS_JD, STATUS_PENDING,
 )
 
@@ -32,21 +32,36 @@ public_router = APIRouter(prefix="/api")
 router = APIRouter(prefix="/api")
 
 
+def _accessible_pids(db: Session, user) -> set[int]:
+    """Profile ids `user` can see: ones they own + ones an admin assigned them.
+    Uses filter_by(...) deliberately so the project-wide owner-filter rewrite
+    doesn't touch this definition."""
+    owned = {pid for (pid,) in db.query(Profile.id).filter_by(user_id=user.id).all()}
+    granted = {pid for (pid,) in db.query(ProfileAccess.profile_id).filter_by(user_id=user.id).all()}
+    return owned | granted
+
+
+def _can_access_profile(db: Session, user, p: Profile) -> bool:
+    if p.user_id == user.id:
+        return True
+    return db.query(ProfileAccess.id).filter_by(profile_id=p.id, user_id=user.id).first() is not None
+
+
 def _user_profile(db: Session, user, pid: int) -> Profile:
-    """Look up a profile and verify it belongs to `user`. 404 otherwise."""
+    """Look up a profile `user` can access (owns or was assigned). 404 otherwise."""
     p = db.get(Profile, pid)
-    if p is None or p.user_id != user.id:
+    if p is None or not _can_access_profile(db, user, p):
         raise HTTPException(404, "Not found.")
     return p
 
 
 def _user_batch(db: Session, user, bid: int) -> Batch:
-    """Look up a batch and verify it belongs to one of `user`'s profiles."""
+    """Look up a batch on a profile `user` can access."""
     b = db.get(Batch, bid)
     if b is None:
         raise HTTPException(404, "Not found.")
     profile = db.get(Profile, b.profile_id)
-    if profile is None or profile.user_id != user.id:
+    if profile is None or not _can_access_profile(db, user, profile):
         raise HTTPException(404, "Not found.")
     return b
 
@@ -249,7 +264,7 @@ def api_dashboard(
 ):
     profiles = (
         db.query(Profile)
-        .filter(Profile.user_id == user.id)
+        .filter(Profile.id.in_(_accessible_pids(db, user)))
         .order_by(Profile.created_at.asc())
         .all()
     )
@@ -389,7 +404,7 @@ def api_list_profiles(
 ):
     rows = (
         db.query(Profile)
-        .filter(Profile.user_id == user.id)
+        .filter(Profile.id.in_(_accessible_pids(db, user)))
         .order_by(Profile.created_at.desc())
         .all()
     )
@@ -406,6 +421,8 @@ def api_create_profile(
     db: Session = Depends(get_db),
     user=Depends(auth.require_user),
 ):
+    if not user.is_admin:
+        raise HTTPException(403, "Only the admin can create profiles.")
     p = Profile(name=body.name.strip(), user_id=user.id)
     db.add(p)
     db.commit()
@@ -425,6 +442,8 @@ def api_update_profile(
     db: Session = Depends(get_db),
     user=Depends(auth.require_user),
 ):
+    if not user.is_admin:
+        raise HTTPException(403, "Only the admin can edit profiles.")
     p = _user_profile(db, user, pid)
     if body.name is not None and body.name.strip():
         p.name = body.name.strip()
@@ -443,6 +462,8 @@ def api_delete_profile(
     db: Session = Depends(get_db),
     user=Depends(auth.require_user),
 ):
+    if not user.is_admin:
+        raise HTTPException(403, "Only the admin can delete profiles.")
     p = _user_profile(db, user, pid)
     p_path = storage.base_resume_path(pid)
     if p_path.exists():
@@ -506,6 +527,8 @@ async def api_upload_resume(
     db: Session = Depends(get_db),
     user=Depends(auth.require_user),
 ):
+    if not user.is_admin:
+        raise HTTPException(403, "Only the admin can set the base resume.")
     p = _user_profile(db, user, pid)
     if not file.filename or not file.filename.lower().endswith(".docx"):
         raise HTTPException(400, "Upload a .docx file.")
@@ -522,6 +545,54 @@ async def api_upload_resume(
     db.commit()
     db.refresh(p)
     return {"profile": _profile_out(p)}
+
+
+# ───────────────── profile ↔ bidder assignment (admin) ─────────────────
+
+@router.get("/admin/profiles/{pid}/access")
+def api_profile_access_list(
+    pid: int, db: Session = Depends(get_db), me=Depends(auth.require_admin),
+):
+    """List every bidder and whether they're assigned to this profile."""
+    p = db.get(Profile, pid)
+    if p is None or p.user_id != me.id:
+        raise HTTPException(404, "Not found.")
+    granted = {
+        uid for (uid,) in db.query(ProfileAccess.user_id).filter_by(profile_id=pid).all()
+    }
+    bidders = (
+        db.query(User)
+        .filter(User.is_admin == False, User.approved == True)  # noqa: E712
+        .order_by(User.email).all()
+    )
+    return {"bidders": [
+        {"id": u.id, "name": _uname(u), "email": u.email, "has_access": u.id in granted}
+        for u in bidders
+    ]}
+
+
+class AccessIn(BaseModel):
+    granted: bool
+
+
+@router.post("/admin/profiles/{pid}/access/{uid}")
+def api_profile_access_set(
+    pid: int, uid: int, body: AccessIn,
+    db: Session = Depends(get_db), me=Depends(auth.require_admin),
+):
+    p = db.get(Profile, pid)
+    if p is None or p.user_id != me.id:
+        raise HTTPException(404, "Not found.")
+    u = db.get(User, uid)
+    if u is None or u.is_admin:
+        raise HTTPException(400, "Not a bidder account.")
+    row = db.query(ProfileAccess).filter_by(profile_id=pid, user_id=uid).first()
+    if body.granted and row is None:
+        db.add(ProfileAccess(profile_id=pid, user_id=uid))
+    elif not body.granted and row is not None:
+        db.delete(row)
+    db.commit()
+    return {"ok": True, "granted": body.granted}
 
 
 # ───────────────── batches ─────────────────
@@ -687,7 +758,7 @@ def _user_stuck_jobs_for_url(db: Session, user, url: str) -> list[JobUrl]:
         db.query(JobUrl)
         .join(Batch, JobUrl.batch_id == Batch.id)
         .join(Profile, Batch.profile_id == Profile.id)
-        .filter(Profile.user_id == user.id)
+        .filter(Profile.id.in_(_accessible_pids(db, user)))
         .filter(JobUrl.url == url)
         .filter(JobUrl.status.in_([STATUS_NEEDS_JD, STATUS_ERROR]))
         .all()
@@ -801,7 +872,7 @@ def api_extension_resume_for(
         db.query(JobUrl, Batch, Profile)
         .join(Batch, JobUrl.batch_id == Batch.id)
         .join(Profile, Batch.profile_id == Profile.id)
-        .filter(Profile.user_id == user.id)
+        .filter(Profile.id.in_(_accessible_pids(db, user)))
         .filter(JobUrl.url == url)
     )
     if profile_id is not None:
@@ -933,7 +1004,7 @@ def api_extension_upload_observed(
         db.query(JobUrl, Batch, Profile)
         .join(Batch, JobUrl.batch_id == Batch.id)
         .join(Profile, Batch.profile_id == Profile.id)
-        .filter(Profile.user_id == user.id)
+        .filter(Profile.id.in_(_accessible_pids(db, user)))
         .filter(JobUrl.url == body.url)
         .all()
     )
@@ -1243,7 +1314,7 @@ def _build_candidate_context_block(
         db.query(JobUrl, Batch, Profile)
         .join(Batch, JobUrl.batch_id == Batch.id)
         .join(Profile, Batch.profile_id == Profile.id)
-        .filter(Profile.user_id == user.id)
+        .filter(Profile.id.in_(_accessible_pids(db, user)))
         .filter(JobUrl.url == url)
     )
     if profile_id_hint is not None:
@@ -1727,7 +1798,7 @@ def api_unread_notes(
         db.query(JobUrl, Batch, Profile)
         .join(Batch, JobUrl.batch_id == Batch.id)
         .join(Profile, Batch.profile_id == Profile.id)
-        .filter(Profile.user_id == me.id)
+        .filter(Profile.id.in_(_accessible_pids(db, me)))
         .filter(JobUrl.note.isnot(None))
         .all()
     )
@@ -1812,7 +1883,7 @@ def _validate_profile_ids(db: Session, user, ids: Optional[list[int]]) -> list[i
         return []
     rows = (
         db.query(Profile.id)
-        .filter(Profile.user_id == user.id)
+        .filter(Profile.id.in_(_accessible_pids(db, user)))
         .filter(Profile.id.in_(ids))
         .all()
     )
@@ -1952,7 +2023,7 @@ def api_search(
         db.query(JobUrl, Batch, Profile)
         .join(Batch, JobUrl.batch_id == Batch.id)
         .join(Profile, Batch.profile_id == Profile.id)
-        .filter(Profile.user_id == me.id)
+        .filter(Profile.id.in_(_accessible_pids(db, me)))
         .filter(or_(
             func.lower(func.coalesce(JobUrl.company, "")).like(like),
             func.lower(func.coalesce(JobUrl.title, "")).like(like),
@@ -2014,7 +2085,7 @@ def api_calendar(
         db.query(Batch)
         .join(Profile, Batch.profile_id == Profile.id)
         .filter(
-            Profile.user_id == me.id,
+            Profile.id.in_(_accessible_pids(db, me)),
             Batch.created_at >= range_start,
             Batch.created_at < range_end,
         ).all()
