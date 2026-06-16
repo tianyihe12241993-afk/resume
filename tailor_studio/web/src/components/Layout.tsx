@@ -46,7 +46,7 @@ export default function Layout() {
   const pendingMembers = members?.pending ?? 0
 
   // App-wide team-chat notifications (badge + desktop notify + title counter).
-  const chatUnread = useChatNotifications(user ?? undefined)
+  const { unread: chatUnread, online } = useChatNotifications(user ?? undefined)
   useEffect(() => {
     document.title = chatUnread > 0 ? `(${chatUnread}) Tailor Studio` : 'Tailor Studio'
   }, [chatUnread])
@@ -99,6 +99,29 @@ export default function Layout() {
             <SideLink to="/members" icon={UserCheck} badge={pendingMembers}>Members</SideLink>
           )}
         </nav>
+
+        {user?.is_admin && (
+          <div className="px-3 pb-3">
+            <div className="text-[10px] uppercase tracking-wider font-semibold text-gray-400 mb-1.5 px-1 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-500" /> Online ({online.length})
+            </div>
+            {online.length === 0 ? (
+              <p className="text-[11px] text-gray-400 px-1">No one online.</p>
+            ) : (
+              <ul className="space-y-0.5 max-h-48 overflow-y-auto">
+                {online.map((n) => (
+                  <li key={n} className="flex items-center gap-2 px-1 py-0.5 text-xs text-gray-600">
+                    <span className="relative shrink-0">
+                      <Avatar name={n} size={20} />
+                      <span className="absolute -right-0.5 -bottom-0.5 w-2 h-2 rounded-full bg-green-500 ring-1 ring-white" />
+                    </span>
+                    <span className="truncate">{n}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
 
         {unreadCount > 0 && unread?.samples && (
           <div className="px-3 pb-3">

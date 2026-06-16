@@ -39,8 +39,9 @@ function notify(m: any, pinged: boolean) {
   if (pinged) ping()
 }
 
-export function useChatNotifications(user: User | undefined): number {
+export function useChatNotifications(user: User | undefined): { unread: number; online: string[] } {
   const [unread, setUnread] = useState(0)
+  const [online, setOnline] = useState<string[]>([])
   const loc = useLocation()
   const onChat = loc.pathname === '/chat' || loc.pathname.endsWith('/chat')
 
@@ -63,6 +64,7 @@ export function useChatNotifications(user: User | undefined): number {
       ws.onmessage = (ev) => {
         let m: any
         try { m = JSON.parse(ev.data) } catch { return }
+        if (m.type === 'presence') { setOnline(m.users ?? []); return }
         if (m.type !== 'message') return
         const me = meRef.current
         if (m.user_id != null && m.user_id === me.id) return        // ignore own
@@ -72,12 +74,12 @@ export function useChatNotifications(user: User | undefined): number {
         setUnread((u) => u + 1)
         notify(m, pinged)
       }
-      ws.onclose = () => { if (!closed) timer = setTimeout(connect, 3000) }
+      ws.onclose = () => { setOnline([]); if (!closed) timer = setTimeout(connect, 3000) }
       ws.onerror = () => ws && ws.close()
     }
     connect()
     return () => { closed = true; if (timer) clearTimeout(timer); ws?.close() }
   }, [user?.id])
 
-  return unread
+  return { unread, online }
 }
