@@ -1,22 +1,26 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Send, Reply, X, Bell, Smile } from 'lucide-react'
+import { Send, Reply, X, Bell, Smile, Pin, Pencil, Trash2 } from 'lucide-react'
 import clsx from 'clsx'
 import { api } from '@/lib/api'
 import { Avatar } from '@/components/charts'
 
 interface QuotedMsg { id: number; name: string; body: string }
+interface PinnedMsg { id: number; name: string; body: string; created_at: string | null }
 interface ChatMsg {
   id: number
   user_id: number | null
   name: string
   body: string
   reply_to?: QuotedMsg | null
+  pinned?: boolean
+  edited_at?: string | null
   created_at: string | null
 }
 interface HistoryResp {
-  me: { id: number; name: string }
+  me: { id: number; name: string; is_admin?: boolean }
   gif_enabled?: boolean
   messages: ChatMsg[]
+  pinned?: PinnedMsg[]
 }
 interface Member { id: number; name: string }
 interface Gif { id: string; preview: string; url: string }
@@ -59,6 +63,9 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [meId, setMeId] = useState<number | null>(null)
   const [meName, setMeName] = useState<string>('')
+  const [meAdmin, setMeAdmin] = useState(false)
+  const [pinned, setPinned] = useState<PinnedMsg[]>([])
+  const [editing, setEditing] = useState<{ id: number } | null>(null)
   const [online, setOnline] = useState(0)
   const [onlineNames, setOnlineNames] = useState<string[]>([])
   const [connected, setConnected] = useState(false)
@@ -98,7 +105,8 @@ export default function ChatPage() {
 
   useEffect(() => {
     api.get<HistoryResp>('/api/chat/messages').then((d) => {
-      setMeId(d.me.id); setMeName(d.me.name); setMessages(d.messages)
+      setMeId(d.me.id); setMeName(d.me.name); setMeAdmin(!!d.me.is_admin)
+      setMessages(d.messages); setPinned(d.pinned ?? [])
       setGifEnabled(!!d.gif_enabled)
       requestAnimationFrame(scrollToBottom)
     }).catch(() => {})
@@ -124,6 +132,21 @@ export default function ChatPage() {
         if (m.type === 'presence') { setOnline(m.online ?? 0); setOnlineNames(m.users ?? []) }
         else if (m.type === 'message') {
           setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]))
+        }
+        else if (m.type === 'edit') {
+          setMessages((prev) => prev.map((x) => x.id === m.id ? { ...x, body: m.body, edited_at: m.edited_at } : x))
+          setPinned((prev) => prev.map((p) => p.id === m.id ? { ...p, body: m.body } : p))
+        }
+        else if (m.type === 'delete') {
+          setMessages((prev) => prev.filter((x) => x.id !== m.id))
+          setPinned((prev) => prev.filter((p) => p.id !== m.id))
+        }
+        else if (m.type === 'pin') {
+          setMessages((prev) => prev.map((x) => x.id === m.id ? { ...x, pinned: m.pinned } : x))
+          setPinned((prev) => {
+            const without = prev.filter((p) => p.id !== m.id)
+            return m.pinned && m.msg ? [m.msg, ...without] : without
+          })
         }
       }
     }
@@ -165,15 +188,38 @@ export default function ChatPage() {
     })
   }
 
+  const wsSend = (obj: any) => {
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj))
+  }
   const sendBody = (raw: string) => {
     const body = raw.trim()
     if (!body) return
-    const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
-    ws.send(JSON.stringify({ body, reply_to_id: replyTo?.id ?? null }))
+    wsSend({ body, reply_to_id: replyTo?.id ?? null })
     setReplyTo(null)
   }
-  const send = () => { sendBody(text); setText(''); setMention(null) }
+  const send = () => {
+    if (editing) {
+      const body = text.trim()
+      if (body) wsSend({ action: 'edit', id: editing.id, body })
+      setEditing(null); setText(''); setMention(null)
+      return
+    }
+    sendBody(text); setText(''); setMention(null)
+  }
+
+  const startEdit = (m: ChatMsg) => {
+    setEditing({ id: m.id }); setReplyTo(null); setText(m.body)
+    requestAnimationFrame(() => taRef.current?.focus())
+  }
+  const cancelEdit = () => { setEditing(null); setText('') }
+  const remove = (m: ChatMsg) => { if (confirm('Delete this message?')) wsSend({ action: 'delete', id: m.id }) }
+  const togglePin = (m: ChatMsg) => wsSend({ action: 'pin', id: m.id, pinned: !m.pinned })
+  const scrollToMsg = (id: number) => {
+    const el = document.getElementById(`msg-${id}`)
+    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('ring-2', 'ring-brand-400')
+      setTimeout(() => el.classList.remove('ring-2', 'ring-brand-400'), 1500) }
+  }
 
   const insertAtCursor = (s: string) => {
     const ta = taRef.current
@@ -260,6 +306,27 @@ export default function ChatPage() {
         </div>
       </div>
 
+      {pinned.length > 0 && (
+        <div className="mb-2 space-y-1">
+          {pinned.map((p) => (
+            <div key={p.id}
+                 className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 text-xs cursor-pointer hover:bg-amber-100/70"
+                 onClick={() => scrollToMsg(p.id)}>
+              <Pin className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+              <span className="text-gray-600 truncate">
+                <span className="font-semibold text-gray-700">{p.name}</span>: {IMG_URL_RE.test(p.body.trim()) ? '🖼️ GIF' : p.body.slice(0, 90)}
+              </span>
+              {meAdmin && (
+                <button onClick={(e) => { e.stopPropagation(); wsSend({ action: 'pin', id: p.id, pinned: false }) }}
+                        title="Unpin" className="ml-auto text-amber-500 hover:text-amber-700 shrink-0">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       <div ref={scrollRef} className="flex-1 overflow-y-auto card p-4 space-y-1.5 bg-slate-50/60">
         {messages.length === 0 && (
           <p className="text-center text-sm text-gray-400 py-10">No messages yet. Say hi 👋</p>
@@ -279,7 +346,8 @@ export default function ChatPage() {
                   </span>
                 </div>
               )}
-              <div className={clsx('group flex items-end gap-2', mine ? 'flex-row-reverse' : 'flex-row')}>
+              <div id={`msg-${m.id}`}
+                   className={clsx('group flex items-end gap-2 rounded-lg transition', mine ? 'flex-row-reverse' : 'flex-row')}>
                 <div className="w-7 shrink-0">{!mine && !grouped && <Avatar name={m.name} size={28} />}</div>
                 <div className="max-w-[78%]">
                   {!grouped && (
@@ -308,17 +376,30 @@ export default function ChatPage() {
                       <span>{renderBody(m.body)}</span>
                     )}
                     <span className="ml-2 align-bottom text-[10px] text-gray-400">
-                      {timeOf(m.created_at)}
+                      {m.edited_at && <span className="mr-1">(edited)</span>}{timeOf(m.created_at)}
                     </span>
                   </div>
                 </div>
-                <button
-                  onClick={() => { setReplyTo(m); taRef.current?.focus() }}
-                  title="Reply"
-                  className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-brand-600 transition shrink-0 mb-1"
-                >
-                  <Reply className="w-3.5 h-3.5" />
-                </button>
+                <div className="opacity-0 group-hover:opacity-100 transition flex items-center gap-0.5 shrink-0 mb-1 text-gray-300">
+                  <button onClick={() => { setEditing(null); setReplyTo(m); taRef.current?.focus() }}
+                          title="Reply" className="hover:text-brand-600 p-0.5"><Reply className="w-3.5 h-3.5" /></button>
+                  {meAdmin && (
+                    <button onClick={() => togglePin(m)} title={m.pinned ? 'Unpin' : 'Pin'}
+                            className={clsx('p-0.5 hover:text-amber-600', m.pinned && 'text-amber-500')}>
+                      <Pin className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  {mine && !IMG_URL_RE.test(m.body.trim()) && (
+                    <button onClick={() => startEdit(m)} title="Edit" className="hover:text-brand-600 p-0.5">
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  {(mine || meAdmin) && (
+                    <button onClick={() => remove(m)} title="Delete" className="hover:text-red-600 p-0.5">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )
@@ -394,7 +475,17 @@ export default function ChatPage() {
           </>
         )}
 
-        {replyTo && (
+        {editing && (
+          <div className="flex items-center gap-2 bg-brand-50 border border-brand-200 rounded-t-lg px-3 py-1.5 text-xs">
+            <Pencil className="w-3.5 h-3.5 text-brand-500 shrink-0" />
+            <span className="text-brand-700">Editing message — press Enter to save</span>
+            <button onClick={cancelEdit} className="ml-auto text-gray-400 hover:text-gray-700">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {replyTo && !editing && (
           <div className="flex items-center gap-2 bg-slate-100 border border-slate-200 rounded-t-lg px-3 py-1.5 text-xs">
             <Reply className="w-3.5 h-3.5 text-brand-500 shrink-0" />
             <span className="text-gray-500 truncate">
@@ -429,7 +520,7 @@ export default function ChatPage() {
             onKeyDown={onKeyDown}
             placeholder={connected ? 'Message your team…  (@ to mention)' : 'Reconnecting…'}
             disabled={!connected}
-            className={clsx('input flex-1 resize-none max-h-32', replyTo && 'rounded-t-none')}
+            className={clsx('input flex-1 resize-none max-h-32', (replyTo || editing) && 'rounded-t-none')}
           />
           <button type="submit" disabled={!connected || !text.trim()} className="btn-primary h-10 px-4 shrink-0">
             <Send className="w-4 h-4" />

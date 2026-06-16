@@ -1413,16 +1413,26 @@ def api_chat_history(
             return None
         return {"id": r.id, "name": r.sender_name or "member", "body": (r.body or "")[:160]}
 
+    pinned_rows = (
+        db.query(ChatMessage).filter(ChatMessage.pinned == True)  # noqa: E712
+        .order_by(ChatMessage.id.desc()).all()
+    )
     return {
-        "me": {"id": me.id, "name": me.email.split("@")[0]},
+        "me": {"id": me.id, "name": me.email.split("@")[0], "is_admin": bool(me.is_admin)},
         "gif_enabled": bool(config.GIPHY_API_KEY),
         "messages": [
             {
                 "id": m.id, "user_id": m.user_id, "name": m.sender_name or "member",
                 "body": m.body, "reply_to": _reply(m.reply_to_id),
+                "pinned": bool(m.pinned), "edited_at": _iso(m.edited_at),
                 "created_at": _iso(m.created_at),
             }
             for m in rows
+        ],
+        "pinned": [
+            {"id": m.id, "name": m.sender_name or "member", "body": m.body,
+             "created_at": _iso(m.created_at)}
+            for m in pinned_rows
         ],
     }
 

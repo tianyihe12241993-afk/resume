@@ -58,6 +58,54 @@ async def chat_ws(websocket: WebSocket):
             data = await websocket.receive_json()
             if not isinstance(data, dict):
                 continue
+            action = data.get("action")
+            mid = data.get("id")
+            mid = int(mid) if isinstance(mid, int) else None
+
+            # ── edit (author only) ──────────────────────────────────────
+            if action == "edit" and mid is not None:
+                body = (data.get("body") or "").strip()
+                if not body:
+                    continue
+                db = get_session()
+                try:
+                    m = chat.edit_message(db, mid, uid, body[:4000])
+                    out = {"type": "edit", "id": mid, "body": m.body,
+                           "edited_at": chat._iso(m.edited_at)} if m else None
+                finally:
+                    db.close()
+                if out:
+                    await chat.manager.broadcast(out)
+                continue
+
+            # ── delete (author or admin) ────────────────────────────────
+            if action == "delete" and mid is not None:
+                db = get_session()
+                try:
+                    u = db.get(User, uid)
+                    ok = chat.delete_message(db, mid, uid, bool(u and u.is_admin))
+                finally:
+                    db.close()
+                if ok:
+                    await chat.manager.broadcast({"type": "delete", "id": mid})
+                continue
+
+            # ── pin / unpin (admin only) ────────────────────────────────
+            if action == "pin" and mid is not None:
+                want = bool(data.get("pinned"))
+                db = get_session()
+                try:
+                    u = db.get(User, uid)
+                    m = chat.set_pin(db, mid, want) if (u and u.is_admin) else None
+                    out = {"type": "pin", "id": mid, "pinned": want,
+                           "msg": chat.pin_view(m)} if m else None
+                finally:
+                    db.close()
+                if out:
+                    await chat.manager.broadcast(out)
+                continue
+
+            # ── new message ─────────────────────────────────────────────
             body = (data.get("body") or "").strip()
             if not body:
                 continue

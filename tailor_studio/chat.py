@@ -50,8 +50,46 @@ def message_payload(m: ChatMessage, reply: Optional[dict] = None) -> dict:
         "name": m.sender_name or "member",
         "body": m.body,
         "reply_to": reply,
+        "pinned": bool(m.pinned),
+        "edited_at": _iso(m.edited_at),
         "created_at": _iso(m.created_at),
     }
+
+
+def edit_message(db, msg_id: int, uid: int, body: str) -> Optional[ChatMessage]:
+    """Edit a message's body. Only the author may edit."""
+    m = db.get(ChatMessage, msg_id)
+    if m is None or m.user_id != uid:
+        return None
+    m.body = body
+    m.edited_at = datetime.now(timezone.utc)
+    db.commit(); db.refresh(m)
+    return m
+
+
+def delete_message(db, msg_id: int, uid: int, is_admin: bool) -> bool:
+    """Delete a message. The author or an admin may delete."""
+    m = db.get(ChatMessage, msg_id)
+    if m is None:
+        return False
+    if m.user_id != uid and not is_admin:
+        return False
+    db.delete(m); db.commit()
+    return True
+
+
+def set_pin(db, msg_id: int, pinned: bool) -> Optional[ChatMessage]:
+    m = db.get(ChatMessage, msg_id)
+    if m is None:
+        return None
+    m.pinned = bool(pinned)
+    db.commit(); db.refresh(m)
+    return m
+
+
+def pin_view(m: ChatMessage) -> dict:
+    return {"id": m.id, "name": m.sender_name or "member", "body": m.body,
+            "created_at": _iso(m.created_at)}
 
 
 def save_message(db, user_id: int, sender_name: str, body: str,

@@ -217,6 +217,8 @@ class ChatMessage(Base):
     reply_to_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("chat_message.id", ondelete="SET NULL"), nullable=True,
     )
+    edited_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
 
 
@@ -275,6 +277,10 @@ def init_db() -> None:
         cm_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(chat_message)"))}
         if cm_cols and "reply_to_id" not in cm_cols:
             conn.execute(text("ALTER TABLE chat_message ADD COLUMN reply_to_id INTEGER"))
+        if cm_cols and "edited_at" not in cm_cols:
+            conn.execute(text("ALTER TABLE chat_message ADD COLUMN edited_at DATETIME"))
+        if cm_cols and "pinned" not in cm_cols:
+            conn.execute(text("ALTER TABLE chat_message ADD COLUMN pinned BOOLEAN NOT NULL DEFAULT 0"))
         if "answer_library_json" not in prof_cols:
             conn.execute(text("ALTER TABLE profile ADD COLUMN answer_library_json TEXT"))
             # Backfill: if a user already saved answers at user-level, seed
