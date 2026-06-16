@@ -66,6 +66,9 @@ export default function ChatPage() {
   const [meAdmin, setMeAdmin] = useState(false)
   const [pinned, setPinned] = useState<PinnedMsg[]>([])
   const [editing, setEditing] = useState<{ id: number } | null>(null)
+  // Admin multi-select / bulk delete
+  const [selecting, setSelecting] = useState(false)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
   const [online, setOnline] = useState(0)
   const [onlineNames, setOnlineNames] = useState<string[]>([])
   const [connected, setConnected] = useState(false)
@@ -141,6 +144,14 @@ export default function ChatPage() {
           setMessages((prev) => prev.filter((x) => x.id !== m.id))
           setPinned((prev) => prev.filter((p) => p.id !== m.id))
         }
+        else if (m.type === 'delete_many') {
+          const ids = new Set<number>(m.ids ?? [])
+          setMessages((prev) => prev.filter((x) => !ids.has(x.id)))
+          setPinned((prev) => prev.filter((p) => !ids.has(p.id)))
+        }
+        else if (m.type === 'clear') {
+          setMessages([]); setPinned([])
+        }
         else if (m.type === 'pin') {
           setMessages((prev) => prev.map((x) => x.id === m.id ? { ...x, pinned: m.pinned } : x))
           setPinned((prev) => {
@@ -215,6 +226,26 @@ export default function ChatPage() {
   const cancelEdit = () => { setEditing(null); setText('') }
   const remove = (m: ChatMsg) => { if (confirm('Delete this message?')) wsSend({ action: 'delete', id: m.id }) }
   const togglePin = (m: ChatMsg) => wsSend({ action: 'pin', id: m.id, pinned: !m.pinned })
+
+  // Admin selection / bulk delete
+  const enterSelect = () => { setSelecting(true); setSelected(new Set()); setEditing(null); setReplyTo(null) }
+  const exitSelect = () => { setSelecting(false); setSelected(new Set()) }
+  const toggleSelect = (id: number) =>
+    setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const allSelected = messages.length > 0 && selected.size === messages.length
+  const toggleSelectAll = () =>
+    setSelected(allSelected ? new Set() : new Set(messages.map((m) => m.id)))
+  const deleteSelected = () => {
+    if (!selected.size) return
+    if (confirm(`Delete ${selected.size} selected message${selected.size === 1 ? '' : 's'}?`)) {
+      wsSend({ action: 'delete_many', ids: [...selected] }); exitSelect()
+    }
+  }
+  const clearAll = () => {
+    if (confirm('Delete ALL messages in this chat? This cannot be undone.')) {
+      wsSend({ action: 'clear' }); exitSelect()
+    }
+  }
   const scrollToMsg = (id: number) => {
     const el = document.getElementById(`msg-${id}`)
     if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('ring-2', 'ring-brand-400')
@@ -280,7 +311,7 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="max-w-3xl mx-auto flex flex-col h-[calc(100vh-8rem)]">
+    <div className="max-w-5xl mx-auto flex flex-col h-[calc(100vh-8rem)]">
       <div className="flex items-center justify-between mb-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Team chat</h1>
@@ -299,6 +330,12 @@ export default function ChatPage() {
               notifications blocked
             </span>
           )}
+          {meAdmin && !selecting && (
+            <button onClick={enterSelect}
+                    className="text-xs text-gray-500 hover:text-brand-600 border border-slate-200 rounded-full px-2.5 py-1">
+              Select
+            </button>
+          )}
           <span className={clsx('w-2 h-2 rounded-full', connected ? 'bg-green-500' : 'bg-gray-300')} />
           <span className="text-gray-500" title={onlineNames.join(', ')}>
             {connected ? `${online} online` : 'connecting…'}
@@ -306,27 +343,23 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {pinned.length > 0 && (
-        <div className="mb-2 space-y-1">
-          {pinned.map((p) => (
-            <div key={p.id}
-                 className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 text-xs cursor-pointer hover:bg-amber-100/70"
-                 onClick={() => scrollToMsg(p.id)}>
-              <Pin className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-              <span className="text-gray-600 truncate">
-                <span className="font-semibold text-gray-700">{p.name}</span>: {IMG_URL_RE.test(p.body.trim()) ? '🖼️ GIF' : p.body.slice(0, 90)}
-              </span>
-              {meAdmin && (
-                <button onClick={(e) => { e.stopPropagation(); wsSend({ action: 'pin', id: p.id, pinned: false }) }}
-                        title="Unpin" className="ml-auto text-amber-500 hover:text-amber-700 shrink-0">
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-          ))}
+      {selecting && (
+        <div className="flex items-center gap-3 mb-2 bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm shadow-sm">
+          <label className="flex items-center gap-1.5 cursor-pointer">
+            <input type="checkbox" checked={allSelected} onChange={toggleSelectAll}
+                   className="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500" />
+            Select all
+          </label>
+          <span className="text-gray-500">{selected.size} selected</span>
+          <button onClick={deleteSelected} disabled={!selected.size}
+                  className="btn-danger text-xs py-1.5 px-3">Delete selected</button>
+          <button onClick={clearAll} className="text-xs text-red-600 hover:text-red-800 font-medium">Delete all</button>
+          <button onClick={exitSelect} className="ml-auto text-xs text-gray-500 hover:text-gray-800">Cancel</button>
         </div>
       )}
 
+      <div className="flex-1 flex gap-4 min-h-0">
+        <div className="flex-1 flex flex-col min-w-0">
       <div ref={scrollRef} className="flex-1 overflow-y-auto card p-4 space-y-1.5 bg-slate-50/60">
         {messages.length === 0 && (
           <p className="text-center text-sm text-gray-400 py-10">No messages yet. Say hi 👋</p>
@@ -347,7 +380,16 @@ export default function ChatPage() {
                 </div>
               )}
               <div id={`msg-${m.id}`}
-                   className={clsx('group flex items-end gap-2 rounded-lg transition', mine ? 'flex-row-reverse' : 'flex-row')}>
+                   onClick={() => selecting && toggleSelect(m.id)}
+                   className={clsx('group flex items-end gap-2 rounded-lg transition px-1 -mx-1',
+                     mine ? 'flex-row-reverse' : 'flex-row',
+                     selecting && 'cursor-pointer',
+                     selecting && selected.has(m.id) && 'bg-brand-100/60 ring-1 ring-brand-300')}>
+                {selecting && (
+                  <input type="checkbox" checked={selected.has(m.id)}
+                         onChange={() => toggleSelect(m.id)} onClick={(e) => e.stopPropagation()}
+                         className="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500 shrink-0 self-center" />
+                )}
                 <div className="w-7 shrink-0">{!mine && !grouped && <Avatar name={m.name} size={28} />}</div>
                 <div className="max-w-[78%]">
                   {!grouped && (
@@ -380,6 +422,7 @@ export default function ChatPage() {
                     </span>
                   </div>
                 </div>
+                {!selecting && (
                 <div className="opacity-0 group-hover:opacity-100 transition flex items-center gap-0.5 shrink-0 mb-1 text-gray-300">
                   <button onClick={() => { setEditing(null); setReplyTo(m); taRef.current?.focus() }}
                           title="Reply" className="hover:text-brand-600 p-0.5"><Reply className="w-3.5 h-3.5" /></button>
@@ -400,6 +443,7 @@ export default function ChatPage() {
                     </button>
                   )}
                 </div>
+                )}
               </div>
             </div>
           )
@@ -526,6 +570,38 @@ export default function ChatPage() {
             <Send className="w-4 h-4" />
           </button>
         </form>
+      </div>
+        </div>
+
+        {/* Pinned panel (right) */}
+        {pinned.length > 0 && (
+          <aside className="w-64 shrink-0 hidden lg:flex flex-col card p-3 bg-amber-50/40 border-amber-200">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-700 uppercase tracking-wide mb-2">
+              <Pin className="w-3.5 h-3.5" /> Pinned ({pinned.length})
+            </div>
+            <div className="flex-1 overflow-y-auto space-y-1.5">
+              {pinned.map((p) => (
+                <div key={p.id}
+                     className="group/pin bg-white border border-amber-200 rounded-lg px-2.5 py-1.5 text-xs cursor-pointer hover:border-amber-300"
+                     onClick={() => scrollToMsg(p.id)}>
+                  <div className="flex items-center gap-1">
+                    <span className="font-semibold text-gray-700 truncate">{p.name}</span>
+                    {meAdmin && (
+                      <button onClick={(e) => { e.stopPropagation(); wsSend({ action: 'pin', id: p.id, pinned: false }) }}
+                              title="Unpin"
+                              className="ml-auto opacity-0 group-hover/pin:opacity-100 text-amber-500 hover:text-amber-700 shrink-0">
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                  <div className="text-gray-500 line-clamp-2 mt-0.5">
+                    {IMG_URL_RE.test(p.body.trim()) ? '🖼️ GIF' : p.body}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </aside>
+        )}
       </div>
     </div>
   )

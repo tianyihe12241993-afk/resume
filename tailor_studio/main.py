@@ -90,6 +90,31 @@ async def chat_ws(websocket: WebSocket):
                     await chat.manager.broadcast({"type": "delete", "id": mid})
                 continue
 
+            # ── bulk delete (admin only) ────────────────────────────────
+            if action == "delete_many":
+                ids = [int(i) for i in (data.get("ids") or []) if isinstance(i, int)][:500]
+                db = get_session()
+                try:
+                    u = db.get(User, uid)
+                    removed = chat.delete_many(db, ids) if (u and u.is_admin and ids) else []
+                finally:
+                    db.close()
+                if removed:
+                    await chat.manager.broadcast({"type": "delete_many", "ids": removed})
+                continue
+
+            # ── clear all (admin only) ──────────────────────────────────
+            if action == "clear":
+                db = get_session()
+                try:
+                    u = db.get(User, uid)
+                    ok = chat.clear_all(db) if (u and u.is_admin) else False
+                finally:
+                    db.close()
+                if ok:
+                    await chat.manager.broadcast({"type": "clear"})
+                continue
+
             # ── pin / unpin (admin only) ────────────────────────────────
             if action == "pin" and mid is not None:
                 want = bool(data.get("pinned"))

@@ -78,6 +78,23 @@ def delete_message(db, msg_id: int, uid: int, is_admin: bool) -> bool:
     return True
 
 
+def delete_many(db, ids: list[int]) -> list[int]:
+    """Admin bulk delete. Returns the ids actually removed."""
+    rows = db.query(ChatMessage).filter(ChatMessage.id.in_(ids)).all()
+    got = [r.id for r in rows]
+    for r in rows:
+        db.delete(r)
+    db.commit()
+    return got
+
+
+def clear_all(db) -> bool:
+    """Admin: delete the entire chat history."""
+    db.query(ChatMessage).delete()
+    db.commit()
+    return True
+
+
 def set_pin(db, msg_id: int, pinned: bool) -> Optional[ChatMessage]:
     m = db.get(ChatMessage, msg_id)
     if m is None:
