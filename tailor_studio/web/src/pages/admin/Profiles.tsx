@@ -34,15 +34,14 @@ export default function Profiles() {
             Profiles <span className="text-gray-400 font-normal text-base">({profiles.length})</span>
           </h1>
         </div>
-        {isAdmin && (
-          <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (name.trim()) create.mutate() }}>
-            <input required className="input" placeholder="New profile name…"
-                   value={name} onChange={(e) => setName(e.target.value)} />
-            <button disabled={create.isPending} className="btn-primary shrink-0 whitespace-nowrap">
-              {create.isPending ? 'Creating…' : '+ Create'}
-            </button>
-          </form>
-        )}
+        {/* Any approved user can create a profile (they own it). */}
+        <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (name.trim()) create.mutate() }}>
+          <input required className="input" placeholder="New profile name…"
+                 value={name} onChange={(e) => setName(e.target.value)} />
+          <button disabled={create.isPending} className="btn-primary shrink-0 whitespace-nowrap">
+            {create.isPending ? 'Creating…' : '+ Create'}
+          </button>
+        </form>
       </div>
 
       {profiles.length > 0 ? (
@@ -50,7 +49,7 @@ export default function Profiles() {
           {profiles.map((p) => <ProfileRow key={p.id} profile={p} isAdmin={isAdmin} />)}
         </ul>
       ) : (
-        <Empty>{isAdmin ? 'No profiles yet. Create one above to get started.' : 'No profiles yet.'}</Empty>
+        <Empty>No profiles yet. Create one above to get started.</Empty>
       )}
     </>
   )

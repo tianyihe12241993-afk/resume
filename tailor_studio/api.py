@@ -33,16 +33,19 @@ router = APIRouter(prefix="/api")
 
 
 def _accessible_pids(db: Session, user) -> set[int]:
-    """Profile ids `user` can see: ones they own + ones an admin assigned them.
+    """Profile ids `user` can act on: ones they own + ones an admin assigned
+    them. Admins have oversight of EVERY profile (incl. bidder-created ones).
     Uses filter_by(...) deliberately so the project-wide owner-filter rewrite
     doesn't touch this definition."""
+    if getattr(user, "is_admin", False):
+        return {pid for (pid,) in db.query(Profile.id).all()}
     owned = {pid for (pid,) in db.query(Profile.id).filter_by(user_id=user.id).all()}
     granted = {pid for (pid,) in db.query(ProfileAccess.profile_id).filter_by(user_id=user.id).all()}
     return owned | granted
 
 
 def _can_access_profile(db: Session, user, p: Profile) -> bool:
-    if p.user_id == user.id:
+    if getattr(user, "is_admin", False) or p.user_id == user.id:
         return True
     return db.query(ProfileAccess.id).filter_by(profile_id=p.id, user_id=user.id).first() is not None
 
@@ -447,9 +450,12 @@ def api_create_profile(
     db: Session = Depends(get_db),
     user=Depends(auth.require_user),
 ):
-    if not user.is_admin:
-        raise HTTPException(403, "Only the admin can create profiles.")
-    p = Profile(name=body.name.strip(), user_id=user.id)
+    # Any approved user can create a profile; they own it (and can fully manage
+    # it). Admins additionally have oversight of every profile via _accessible.
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "Profile name is required.")
+    p = Profile(name=name, user_id=user.id)
     db.add(p)
     db.commit()
     db.refresh(p)
