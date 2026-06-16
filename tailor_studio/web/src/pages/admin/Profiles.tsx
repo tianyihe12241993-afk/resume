@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronRight, Pencil, Trash2, Check, X, FileCheck, FileWarning } from 'lucide-react'
+import { ChevronRight, Pencil, Trash2, Check, X, FileCheck, FileWarning, Lock } from 'lucide-react'
+import clsx from 'clsx'
 import { api, type Profile } from '@/lib/api'
 import { Empty } from '@/components/ui'
 import { Avatar } from '@/components/charts'
@@ -49,7 +50,7 @@ export default function Profiles() {
           {profiles.map((p) => <ProfileRow key={p.id} profile={p} isAdmin={isAdmin} />)}
         </ul>
       ) : (
-        <Empty>{isAdmin ? 'No profiles yet. Create one above to get started.' : 'No profiles assigned to you yet. Ask your admin for access.'}</Empty>
+        <Empty>{isAdmin ? 'No profiles yet. Create one above to get started.' : 'No profiles yet.'}</Empty>
       )}
     </>
   )
@@ -104,29 +105,50 @@ function ProfileRow({ profile, isAdmin }: { profile: Profile; isAdmin: boolean }
     )
   }
 
-  return (
-    <li className="flex items-center px-5 py-4 hover:bg-slate-50/60 transition">
-      <Link to={`/admin/profiles/${profile.id}`} className="flex items-center gap-3 flex-1 min-w-0">
-        <Avatar name={profile.name} size={40} />
-        <div className="flex-1 min-w-0">
-          <p className="font-semibold text-gray-900 truncate">{profile.name}</p>
-          <p className="text-xs text-gray-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
-            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded text-[10px] font-semibold">
-              {profile.batch_count} {profile.batch_count === 1 ? 'batch' : 'batches'}
+  const canAccess = profile.can_access !== false
+  const inner = (
+    <>
+      <Avatar name={profile.name} size={40} />
+      <div className="flex-1 min-w-0">
+        <p className="font-semibold text-gray-900 truncate flex items-center gap-1.5">
+          {profile.name}
+          {!canAccess && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-gray-400 bg-slate-100 rounded-full px-1.5 py-0.5">
+              <Lock className="w-2.5 h-2.5" /> no access
             </span>
-            {profile.base_resume_filename ? (
-              <span className="inline-flex items-center gap-1 text-emerald-700">
-                <FileCheck className="w-3 h-3" />
-                <span className="truncate max-w-[280px]">{profile.base_resume_filename}</span>
-              </span>
-            ) : (
-              <span className="inline-flex items-center gap-1 text-amber-700 font-medium">
-                <FileWarning className="w-3 h-3" /> no base resume
-              </span>
-            )}
-          </p>
-        </div>
-      </Link>
+          )}
+        </p>
+        <p className="text-xs text-gray-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
+          {(profile.total ?? 0) > 0 && (
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-brand-50 text-brand-700 rounded text-[10px] font-semibold">
+              {profile.applied ?? 0} applied · {profile.done ?? 0} tailored
+            </span>
+          )}
+          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded text-[10px] font-semibold">
+            {profile.batch_count} {profile.batch_count === 1 ? 'batch' : 'batches'}
+          </span>
+          {profile.base_resume_filename ? (
+            <span className="inline-flex items-center gap-1 text-emerald-700">
+              <FileCheck className="w-3 h-3" />
+              <span className="truncate max-w-[280px]">{profile.base_resume_filename}</span>
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 text-amber-700 font-medium">
+              <FileWarning className="w-3 h-3" /> no base resume
+            </span>
+          )}
+        </p>
+      </div>
+    </>
+  )
+
+  return (
+    <li className={clsx('flex items-center px-5 py-4 transition', canAccess ? 'hover:bg-slate-50/60' : 'bg-slate-50/40')}>
+      {canAccess ? (
+        <Link to={`/admin/profiles/${profile.id}`} className="flex items-center gap-3 flex-1 min-w-0">{inner}</Link>
+      ) : (
+        <div className="flex items-center gap-3 flex-1 min-w-0 cursor-default" title="You don't have access to this profile">{inner}</div>
+      )}
       <div className="flex items-center gap-1 shrink-0 ml-3">
         {isAdmin && (<>
         <button
@@ -145,11 +167,13 @@ function ProfileRow({ profile, isAdmin }: { profile: Profile; isAdmin: boolean }
           title="Delete profile"
         ><Trash2 className="w-4 h-4" /></button>
         </>)}
-        <Link
-          to={`/admin/profiles/${profile.id}`}
-          className="p-2 text-gray-300 hover:text-gray-600 hover:bg-slate-100 rounded-md transition"
-          title="Open"
-        ><ChevronRight className="w-4 h-4" /></Link>
+        {canAccess && (
+          <Link
+            to={`/admin/profiles/${profile.id}`}
+            className="p-2 text-gray-300 hover:text-gray-600 hover:bg-slate-100 rounded-md transition"
+            title="Open"
+          ><ChevronRight className="w-4 h-4" /></Link>
+        )}
       </div>
     </li>
   )

@@ -65,6 +65,11 @@ export interface Profile {
   tailor_prompt: string
   uses_default_prompt: boolean
   created_at: string
+  // Profiles list extras: whether the viewer can open/work on it + progress.
+  can_access?: boolean
+  total?: number
+  done?: number
+  applied?: number
 }
 
 export type JobStatus = 'pending' | 'fetching' | 'analyzing' | 'tailoring' | 'done' | 'needs_manual_jd' | 'error'

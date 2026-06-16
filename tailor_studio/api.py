@@ -402,13 +402,32 @@ def api_list_profiles(
     db: Session = Depends(get_db),
     user=Depends(auth.require_user),
 ):
-    rows = (
-        db.query(Profile)
-        .filter(Profile.id.in_(_accessible_pids(db, user)))
-        .order_by(Profile.created_at.desc())
-        .all()
-    )
-    return {"profiles": [_profile_out(p) for p in rows]}
+    # Everyone sees every profile card (so bidders can see the whole team's work),
+    # but `can_access` controls whether they can open / act on it.
+    rows = db.query(Profile).order_by(Profile.created_at.desc()).all()
+    accessible = _accessible_pids(db, user)
+    out = []
+    for p in rows:
+        counts = dict(
+            db.query(JobUrl.status, func.count(JobUrl.id))
+            .join(Batch, JobUrl.batch_id == Batch.id)
+            .filter(Batch.profile_id == p.id)
+            .group_by(JobUrl.status).all()
+        )
+        applied = (
+            db.query(func.count(JobUrl.id))
+            .join(Batch, JobUrl.batch_id == Batch.id)
+            .filter(Batch.profile_id == p.id, JobUrl.application_status == "applied")
+            .scalar()
+        )
+        out.append({
+            **_profile_out(p),
+            "can_access": p.id in accessible,
+            "total": sum(counts.values()),
+            "done": counts.get(STATUS_DONE, 0),
+            "applied": applied or 0,
+        })
+    return {"profiles": out}
 
 
 class ProfileCreateIn(BaseModel):
@@ -1581,8 +1600,20 @@ def _member_out(u: User) -> dict:
 @router.get("/admin/members")
 def api_members(db: Session = Depends(get_db), me=Depends(auth.require_admin)):
     users = db.query(User).order_by(User.approved.asc(), User.created_at.desc()).all()
+    grant_counts = dict(
+        db.query(ProfileAccess.user_id, func.count(ProfileAccess.id))
+        .group_by(ProfileAccess.user_id).all()
+    )
+    owned_counts = dict(
+        db.query(Profile.user_id, func.count(Profile.id))
+        .group_by(Profile.user_id).all()
+    )
+
+    def _pc(u):
+        return owned_counts.get(u.id, 0) if u.is_admin else grant_counts.get(u.id, 0)
+
     return {
-        "members": [_member_out(u) for u in users],
+        "members": [{**_member_out(u), "profile_count": _pc(u)} for u in users],
         "pending": sum(1 for u in users if not u.approved),
     }
 

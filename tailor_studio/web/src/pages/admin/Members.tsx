@@ -15,6 +15,7 @@ interface Member {
   approved: boolean
   is_admin: boolean
   created_at: string
+  profile_count?: number
 }
 
 export default function MembersPage() {
@@ -121,6 +122,10 @@ function MemberRow({ m, onRemove, removing }: { m: Member; onRemove: () => void;
         </div>
         {!m.is_admin && (
           <>
+            <span className="text-xs text-gray-500 bg-slate-100 rounded-full px-2 py-0.5 font-medium tabular-nums"
+                  title="Profiles assigned">
+              {m.profile_count ?? 0} {(m.profile_count ?? 0) === 1 ? 'profile' : 'profiles'}
+            </span>
             <button onClick={() => setOpen((o) => !o)}
                     className="btn-secondary text-xs py-1.5 px-3 inline-flex items-center gap-1">
               <FolderKanban className="w-3.5 h-3.5" /> Profiles
@@ -151,6 +156,7 @@ function ProfileToggles({ uid }: { uid: number }) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['admin/member-profiles', uid] })
       qc.invalidateQueries({ queryKey: ['admin/profiles'] })
+      qc.invalidateQueries({ queryKey: ['admin/members'] })
     },
   })
   const profiles = data?.profiles ?? []
