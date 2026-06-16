@@ -7,7 +7,7 @@ import { Avatar, MiniDonut, StatTile, WeekHeatmap, paletteForName } from '@/comp
 import { formatLongDate } from '@/lib/format'
 import {
   ArrowRight, Target, CheckCircle2, Sparkles, TrendingUp,
-  Plus, Upload, Download, AlertCircle, Lock,
+  Plus, Upload, Download, Copy, AlertCircle, Lock,
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -23,6 +23,7 @@ export default function Dashboard() {
 
   const [startForProfile, setStartForProfile] = useState<number | null>(null)
   const [urls, setUrls] = useState('')
+  const [showUrlsDialog, setShowUrlsDialog] = useState(false)
 
   interface PasteResult {
     batch_id: number | null
@@ -119,6 +120,9 @@ export default function Dashboard() {
           <h1 className="text-2xl font-bold text-gray-900">Today</h1>
         </div>
         <div className="flex items-center gap-2">
+          <button onClick={() => setShowUrlsDialog(true)} className="btn-secondary text-sm" title="Copy all of today's job URLs to paste into another instance">
+            <Copy className="w-4 h-4" /> Copy URLs
+          </button>
           <a href={`/download/resumes/zip?date=${data.today}`} className="btn-secondary text-sm" title="Download every tailored resume from today as a zip">
             <Download className="w-4 h-4" /> Today’s resumes
           </a>
@@ -310,7 +314,93 @@ export default function Dashboard() {
           }}
         />
       )}
+      {showUrlsDialog && (
+        <TodayUrlsDialog
+          jobs={filtered.today_jobs}
+          onClose={() => setShowUrlsDialog(false)}
+        />
+      )}
     </>
+  )
+}
+
+
+function TodayUrlsDialog({ jobs, onClose }: { jobs: AdminDashboard['today_jobs']; onClose: () => void }) {
+  // Group today's URLs by batch (one batch per profile), deduped within each.
+  const groups = useMemo(() => {
+    const m = new Map<number, { profile: string; urls: string[] }>()
+    for (const j of jobs) {
+      if (!j.url) continue
+      const g = m.get(j.batch_id) ?? { profile: j.profile_name, urls: [] }
+      if (!g.urls.includes(j.url)) g.urls.push(j.url)
+      m.set(j.batch_id, g)
+    }
+    return Array.from(m.entries())
+      .map(([batch_id, g]) => ({ batch_id, ...g }))
+      .sort((a, b) => a.profile.localeCompare(b.profile))
+  }, [jobs])
+  const total = groups.reduce((n, g) => n + g.urls.length, 0)
+  const [copiedKey, setCopiedKey] = useState<string | null>(null)
+  const copy = async (key: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedKey(key)
+      setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 2000)
+    } catch {
+      const ta = document.getElementById(`urls-${key}`) as HTMLTextAreaElement | null
+      ta?.select()
+    }
+  }
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 grid place-items-center p-4" onClick={onClose}>
+      <div className="card w-full max-w-xl p-5 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between mb-3">
+          <div>
+            <h3 className="font-semibold text-gray-900 text-lg">Today’s URLs by batch</h3>
+            <p className="text-xs text-gray-500 mt-0.5">{groups.length} batch{groups.length === 1 ? '' : 'es'} · {total} URL{total === 1 ? '' : 's'} — copy a batch and paste into another instance’s “New batch” box.</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl leading-none ml-3">✕</button>
+        </div>
+
+        <div className="overflow-y-auto space-y-4 pr-1">
+          {groups.length === 0 && <p className="text-sm text-gray-400 text-center py-6">No URLs added today.</p>}
+          {groups.map((g) => {
+            const key = String(g.batch_id)
+            const text = g.urls.join('\n')
+            return (
+              <div key={g.batch_id}>
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-sm font-semibold text-gray-900">
+                    {g.profile} <span className="font-normal text-gray-500">· {g.urls.length} URL{g.urls.length === 1 ? '' : 's'}</span>
+                  </p>
+                  <button onClick={() => copy(key, text)} className="btn-secondary text-xs py-1 px-2.5">
+                    {copiedKey === key ? '✓ Copied' : 'Copy'}
+                  </button>
+                </div>
+                <textarea
+                  id={`urls-${key}`}
+                  readOnly
+                  value={text}
+                  onFocus={(e) => e.currentTarget.select()}
+                  className="w-full h-28 text-xs font-mono border border-slate-200 rounded-md p-2 bg-slate-50 resize-none"
+                />
+              </div>
+            )
+          })}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 mt-4 pt-3 border-t border-slate-100">
+          <button onClick={onClose} className="btn-secondary text-sm">Close</button>
+          <button
+            onClick={() => copy('all', groups.map((g) => `# ${g.profile}\n${g.urls.join('\n')}`).join('\n\n'))}
+            disabled={!total}
+            className="btn-primary text-sm"
+          >
+            {copiedKey === 'all' ? '✓ Copied' : 'Copy all'}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
