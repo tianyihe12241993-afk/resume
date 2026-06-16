@@ -957,7 +957,30 @@ def api_extension_resume_for(
     )
     if profile_id is not None:
         q = q.filter(Profile.id == profile_id)
-    row = q.order_by(JobUrl.created_at.desc()).first()
+    matches = q.order_by(JobUrl.created_at.desc()).all()
+    row = matches[0] if matches else None
+
+    # SAFETY: the same JD URL is commonly added to several profiles (5-6 people
+    # applying to the same jobs). If the caller didn't pin a profile and the URL
+    # matches MORE THAN ONE, do NOT guess — guessing served the wrong person's
+    # resume. Return the candidates so the widget makes the bidder pick.
+    if profile_id is None:
+        distinct_pids = {p.id for (_, _, p) in matches}
+        if len(distinct_pids) > 1:
+            seen: set[int] = set()
+            candidates = []
+            for (j, b, p) in matches:
+                if p.id in seen:
+                    continue
+                seen.add(p.id)
+                candidates.append({
+                    "profile_id": p.id,
+                    "profile_name": p.name,
+                    "job_id": j.id,
+                    "status": j.status,
+                    "has_tailored": j.status == STATUS_DONE and bool(j.docx_filename),
+                })
+            return {"matched": True, "ambiguous": True, "candidates": candidates, "base": None}
 
     # Always include the main-profile base-resume info so the widget can
     # fall back when no tailored resume exists yet.

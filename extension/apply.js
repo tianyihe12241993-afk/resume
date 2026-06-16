@@ -218,6 +218,28 @@
       return;
     }
 
+    // This JD is tracked for MORE THAN ONE profile and the bidder hasn't pinned
+    // which one they're working on. Never guess — that downloads the wrong
+    // person's resume. Make them pick; the choice is remembered for the session.
+    if (info.ambiguous && Array.isArray(info.candidates) && info.candidates.length) {
+      renderWidget({
+        tone: 'amber',
+        header: '⚠ Which candidate?',
+        filename: '',
+        body: 'This job is tracked for several profiles — pick whose resume to use.',
+        actions: info.candidates.map((c) => ({
+          label: (c.has_tailored ? '✓ ' : '') + c.profile_name,
+          onClick: async () => {
+            await send({ type: 'set_main_profile', profileId: c.profile_id });
+            lastResumeUrl = null;      // allow re-fetch
+            dismissed = false; uploadShown = false;
+            maybeResumeReady();        // re-render now scoped to the chosen profile
+          },
+        })),
+      });
+      return;
+    }
+
     // We have a JobUrl match. Render by pipeline status.
     if (info.status === 'done' && info.has_tailored) {
       const t = info.tailored;
@@ -229,9 +251,9 @@
       lastWidgetState = 'ready';
       renderWidget({
         tone: 'green',
-        header: `Tailored ✓  ${info.company || ''}`.trim(),
+        header: `Tailored ✓  ${info.profile_name || ''}`.trim(),
         filename: t.filename,
-        body: 'Download .docx or PDF, then upload it on the job site.',
+        body: `${info.company || 'This job'} · download .docx or PDF, then upload it.`,
         actions: [
           { label: '↓ Download .docx',
             onClick: async () => { await send({ type: 'download_resume', path: t.docx_url, filename: t.filename }); } },

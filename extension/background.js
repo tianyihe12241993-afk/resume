@@ -75,8 +75,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
 
       // ── Apply: resume widget / draft / upload audit ─────────────────
+      if (msg.type === 'set_main_profile') {
+        await chrome.storage.local.set({ mainProfileId: msg.profileId || null });
+        sendResponse({ ok: true });
+        return;
+      }
       if (msg.type === 'resume_for') {
-        const pid = await getMainProfileId();
+        // Explicit profile (from the in-page picker) wins over the saved main.
+        const pid = msg.profileId || await getMainProfileId();
         const qs = new URLSearchParams({ url: msg.url });
         if (pid) qs.set('profile_id', String(pid));
         sendResponse(await getJson('/api/extension/resume_for?' + qs.toString()));
