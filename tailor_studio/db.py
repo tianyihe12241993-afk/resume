@@ -11,7 +11,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Column, Date, DateTime, ForeignKey, Integer, String, Text, Boolean,
-    create_engine, text,
+    create_engine, event, text,
 )
 from sqlalchemy.orm import (
     DeclarativeBase, Mapped, Session, mapped_column, relationship,
@@ -253,9 +253,29 @@ class ProfileAccess(Base):
 
 _engine = create_engine(
     f"sqlite:///{config.DB_PATH}",
-    connect_args={"check_same_thread": False},
+    # 30s busy timeout at the driver level so writers wait instead of erroring.
+    connect_args={"check_same_thread": False, "timeout": 30},
+    # The default pool (5 + 10) starved under dashboard polling + WebSockets +
+    # the worker pool. A bigger pool + fail-fast checkout keeps the API alive.
+    pool_size=30,
+    max_overflow=20,
+    pool_timeout=10,
+    pool_pre_ping=True,
     future=True,
 )
+
+
+@event.listens_for(_engine, "connect")
+def _sqlite_pragmas(dbapi_conn, _rec):
+    """WAL mode lets many readers run concurrently with one writer — essential
+    once several bidders + the dashboard's 5s polling hit SQLite at once."""
+    cur = dbapi_conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA busy_timeout=30000")
+    cur.execute("PRAGMA synchronous=NORMAL")
+    cur.close()
+
+
 SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
 
 
