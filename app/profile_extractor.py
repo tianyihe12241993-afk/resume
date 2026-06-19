@@ -115,8 +115,6 @@ _mem_cache: dict[str, dict] = {}
 
 
 def _client() -> Anthropic:
-    if not config.ANTHROPIC_API_KEY:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set.")
     return make_client()
 
 

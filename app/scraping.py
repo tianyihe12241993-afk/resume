@@ -572,10 +572,8 @@ def _haiku_extract_from_html(html: str, url: str) -> Optional[dict]:
         cleaned_html = cleaned_html[:30_000]
 
     try:
-        # Lazy import to avoid pulling Anthropic into hot path when unused.
         from . import config
-        from anthropic import Anthropic
-        if not config.ANTHROPIC_API_KEY:
+        if not config.has_llm_key():
             return None
         client = make_client()
         prompt = (

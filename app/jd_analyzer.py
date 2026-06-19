@@ -93,10 +93,6 @@ _client_singleton: Optional[Anthropic] = None
 def _client() -> Anthropic:
     global _client_singleton
     if _client_singleton is None:
-        if not config.ANTHROPIC_API_KEY:
-            raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set. Edit .env and restart the server."
-            )
         _client_singleton = make_client()
     return _client_singleton
 

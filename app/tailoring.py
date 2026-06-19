@@ -498,10 +498,6 @@ def _rebuild_run_with_bold(p, keep, segments: list[tuple[str, bool]]) -> None:
 # --------------------------------------------------------------------------
 
 def _client() -> Anthropic:
-    if not config.ANTHROPIC_API_KEY:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set. Edit .env and restart the server."
-        )
     return make_client()
 
 

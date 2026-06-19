@@ -43,13 +43,31 @@ ANTHROPIC_MAX_RETRIES = int(os.getenv("ANTHROPIC_MAX_RETRIES", "2"))
 # (all jobs, all fan-out). Decouples API load from STUDIO_WORKERS so a big batch
 # can't overwhelm your Anthropic rate limit (which causes 429 backoff + stalls).
 ANTHROPIC_MAX_CONCURRENCY = int(os.getenv("ANTHROPIC_MAX_CONCURRENCY", "12"))
-TAILOR_MODEL = os.getenv("TAILOR_MODEL", "claude-sonnet-4-6")
-EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "claude-haiku-4-5-20251001")
-# Defensibility / judgment calls (adjacency bridges, truthful skills-rewrite).
-# These decide whether a JD skill is a real match, an adjacent bridge, or an
-# over-reach — the highest-leverage judgment in the pipeline — so they default
-# to the stronger model rather than the cheap extraction one.
-JUDGE_MODEL = os.getenv("JUDGE_MODEL", "claude-sonnet-4-6")
+
+# ── LLM provider ──────────────────────────────────────────────────────────
+# "anthropic" (default) or "openai". When "openai", every LLM call routes
+# through an Anthropic-compatible shim to OpenAI's chat API, and the model vars
+# below default to GPT equivalents. Set OPENAI_API_KEY for the openai provider.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").strip().lower()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+
+def has_llm_key() -> bool:
+    """True if the active provider's API key is configured."""
+    return bool(OPENAI_API_KEY) if LLM_PROVIDER == "openai" else bool(ANTHROPIC_API_KEY)
+
+if LLM_PROVIDER == "openai":
+    # Writer (bullets/summary) + judge (adjacency/skills) on a strong model;
+    # extraction (JD analysis, normalize) on a cheap one. Override per var.
+    TAILOR_MODEL = os.getenv("TAILOR_MODEL", "gpt-4o")
+    JUDGE_MODEL = os.getenv("JUDGE_MODEL", "gpt-4o")
+    EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "gpt-4o-mini")
+else:
+    TAILOR_MODEL = os.getenv("TAILOR_MODEL", "claude-sonnet-4-6")
+    # Defensibility / judgment calls (adjacency bridges, truthful skills-rewrite)
+    # — the highest-leverage judgment — default to the stronger model.
+    JUDGE_MODEL = os.getenv("JUDGE_MODEL", "claude-sonnet-4-6")
+    EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "claude-haiku-4-5-20251001")
 
 # Email (magic link)
 SMTP_HOST = os.getenv("SMTP_HOST", "")
