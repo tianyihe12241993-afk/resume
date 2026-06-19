@@ -185,6 +185,11 @@ class JobUrl(Base):
     note_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     note_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     note_confirmed_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Per-user "seen" map {user_id: iso8601}. A note is unread FOR a user when
+    # note_updated_at is newer than their entry (or they have none) — so when one
+    # person acts on a note (write / confirm / reply), the OTHER party gets
+    # notified independently, instead of one global flag clearing it for all.
+    note_seen_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
@@ -307,6 +312,7 @@ def init_db() -> None:
             ("note_by",             "VARCHAR(64)"),
             ("note_confirmed_at",   "DATETIME"),
             ("note_confirmed_by",   "VARCHAR(64)"),
+            ("note_seen_json",      "TEXT"),
             ("note_updated_at",     "DATETIME"),
             ("note_seen_at",        "DATETIME"),
             ("apply_count",         "INTEGER NOT NULL DEFAULT 0"),

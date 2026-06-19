@@ -192,7 +192,16 @@ def _profile_out(p: Profile) -> dict:
     }
 
 
-def _job_out(j: JobUrl, *, with_coverage: bool = False) -> dict:
+def _job_out(j: JobUrl, *, with_coverage: bool = False, me=None) -> dict:
+    # Per-user unread when we know the viewer; else fall back to the legacy
+    # global flag (used by serializers that don't carry the user).
+    if me is not None:
+        unread = _note_unread_for(j, me)
+    else:
+        unread = bool(
+            j.note and j.note.strip()
+            and (j.note_seen_at is None or (j.note_updated_at and j.note_updated_at > j.note_seen_at))
+        )
     out = {
         "id": j.id,
         "url": j.url,
@@ -220,10 +229,7 @@ def _job_out(j: JobUrl, *, with_coverage: bool = False) -> dict:
         "note_by": j.note_by,
         "note_confirmed_at": _iso(j.note_confirmed_at),
         "note_confirmed_by": j.note_confirmed_by,
-        "has_unread_note": bool(
-            j.note and j.note.strip() and
-            (j.note_seen_at is None or (j.note_updated_at and j.note_updated_at > j.note_seen_at))
-        ),
+        "has_unread_note": unread,
         "created_at": _iso(j.created_at),
     }
     if with_coverage:
@@ -1601,7 +1607,7 @@ def api_batch_detail(
     return {
         "batch": {"id": b.id, "created_at": _iso(b.created_at)},
         "profile": {"id": b.profile.id, "name": b.profile.name},
-        "jobs": [_job_out(j, with_coverage=True) for j in jobs],
+        "jobs": [_job_out(j, with_coverage=True, me=me) for j in jobs],
         "summary": _batch_summary(jobs),
     }
 
@@ -1803,7 +1809,7 @@ def api_manual_jd(
     j.error_message = None
     db.commit()
     pipeline.enqueue(j.id)
-    return {"job": _job_out(j)}
+    return {"job": _job_out(j, me=me)}
 
 
 @router.post("/admin/batches/{bid}/jobs/{jid}/retry")
@@ -1817,7 +1823,7 @@ def api_retry_job(
     j.error_message = None
     db.commit()
     pipeline.enqueue(j.id)
-    return {"job": _job_out(j)}
+    return {"job": _job_out(j, me=me)}
 
 
 class ClaimIn(BaseModel):
@@ -1839,7 +1845,7 @@ def api_claim_terms(
     j.error_message = None
     db.commit()
     pipeline.enqueue(j.id)
-    return {"job": _job_out(j)}
+    return {"job": _job_out(j, me=me)}
 
 
 class AppStatusIn(BaseModel):
@@ -1878,7 +1884,7 @@ def api_app_status(
     if body.note is not None:
         j.application_note = body.note.strip() or None
     db.commit()
-    return {"job": _job_out(j)}
+    return {"job": _job_out(j, me=me)}
 
 
 @router.post("/admin/batches/{bid}/jobs/{jid}/reapply")
@@ -1896,11 +1902,45 @@ def api_reapply(
     j.applied_at = datetime.now(timezone.utc)
     j.application_source = "manual"
     db.commit()
-    return {"job": _job_out(j)}
+    return {"job": _job_out(j, me=me)}
 
 
 class NoteIn(BaseModel):
     text: str
+
+
+def _note_seen_map(j: JobUrl) -> dict:
+    try:
+        return json.loads(j.note_seen_json) if j.note_seen_json else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _note_mark_seen(j: JobUrl, user) -> None:
+    """Record that `user` has seen the note's current state (per-user)."""
+    m = _note_seen_map(j)
+    m[str(user.id)] = datetime.now(timezone.utc).isoformat()
+    j.note_seen_json = json.dumps(m)
+
+
+def _note_unread_for(j: JobUrl, user) -> bool:
+    """A note is unread for `user` when it has activity newer than the last time
+    THEY saw it (or they've never seen it)."""
+    if not j.note or not j.note.strip() or j.note_updated_at is None:
+        return False
+    seen = _note_seen_map(j).get(str(user.id))
+    if not seen:
+        return True
+    try:
+        seen_dt = datetime.fromisoformat(seen)
+    except ValueError:
+        return True
+    upd = j.note_updated_at
+    if upd.tzinfo is None:
+        upd = upd.replace(tzinfo=timezone.utc)
+    if seen_dt.tzinfo is None:
+        seen_dt = seen_dt.replace(tzinfo=timezone.utc)
+    return upd > seen_dt
 
 
 @router.post("/admin/batches/{bid}/jobs/{jid}/note")
@@ -1909,25 +1949,26 @@ def api_save_note(
     db: Session = Depends(get_db),
     me=Depends(auth.require_user),
 ):
-    """Save the collaboration note for a job. Touches note_updated_at so
-    the unread badge fires for the other viewer until they open the note."""
+    """Save/edit the note for a job. Bumps note_updated_at (so the OTHER party
+    gets an unread notification) and marks the author as having seen it."""
     j = _user_job(db, me, bid, jid)
     text = (body.text or "").strip()
     j.note = text or None
     j.note_updated_at = datetime.now(timezone.utc) if text else None
     if text:
-        # A new/edited note records its author and re-opens it (unconfirmed).
+        # A new/edited note records its author, re-opens it (unconfirmed), and
+        # counts as seen by the author — so only the OTHER side is notified.
         j.note_by = _uname(me)
         j.note_confirmed_at = None
         j.note_confirmed_by = None
+        _note_mark_seen(j, me)
     else:
-        # Clearing the note resets all its metadata.
-        j.note_seen_at = None
         j.note_by = None
         j.note_confirmed_at = None
         j.note_confirmed_by = None
+        j.note_seen_json = None
     db.commit()
-    return {"job": _job_out(j)}
+    return {"job": _job_out(j, me=me)}
 
 
 @router.post("/admin/batches/{bid}/jobs/{jid}/note/confirm")
@@ -1945,8 +1986,12 @@ def api_confirm_note(
     else:
         j.note_confirmed_at = None
         j.note_confirmed_by = None
+    # Confirming is activity too: bump updated_at so the note's author gets
+    # notified ("your note was confirmed"), and mark the actor as seen.
+    j.note_updated_at = datetime.now(timezone.utc)
+    _note_mark_seen(j, me)
     db.commit()
-    return {"job": _job_out(j)}
+    return {"job": _job_out(j, me=me)}
 
 
 @router.post("/admin/batches/{bid}/jobs/{jid}/note/seen")
@@ -1955,11 +2000,13 @@ def api_mark_note_seen(
     db: Session = Depends(get_db),
     me=Depends(auth.require_user),
 ):
-    """Mark the collaboration note as read by stamping note_seen_at = now()."""
+    """Mark the note as read BY THIS USER (per-user), clearing only their badge."""
     j = _user_job(db, me, bid, jid)
-    j.note_seen_at = datetime.now(timezone.utc)
-    db.commit()
-    return {"job": _job_out(j)}
+    if j.note:
+        _note_mark_seen(j, me)
+        j.note_seen_at = datetime.now(timezone.utc)  # legacy field, kept in sync
+        db.commit()
+    return {"job": _job_out(j, me=me)}
 
 
 @router.get("/admin/notes/unread")
@@ -1967,32 +2014,42 @@ def api_unread_notes(
     db: Session = Depends(get_db),
     me=Depends(auth.require_user),
 ):
-    """Open feedback notes across the user's profiles — notes that exist and
-    haven't been confirmed yet. Powers the sidebar feedback queue (each item is
-    clickable to the job, shows its author, and can be confirmed)."""
+    """Notes with NEW activity for THIS user — per-user. Powers the sidebar
+    notifications: a fresh note, or someone confirming/editing a note you're
+    involved with, shows here until you view it. Each shows author, confirmed
+    status, and links to the job."""
     rows = (
         db.query(JobUrl, Batch, Profile)
         .join(Batch, JobUrl.batch_id == Batch.id)
         .join(Profile, Batch.profile_id == Profile.id)
         .filter(Profile.id.in_(_accessible_pids(db, me)))
         .filter(JobUrl.note.isnot(None))
-        .filter(JobUrl.note_confirmed_at.is_(None))
         .order_by(JobUrl.note_updated_at.desc())
         .all()
     )
     samples = []
     for (j, b, p) in rows:
-        if not j.note or not j.note.strip():
+        if not _note_unread_for(j, me):
             continue
-        unread = j.note_seen_at is None or (j.note_updated_at and j.note_updated_at > j.note_seen_at)
+        confirmed = j.note_confirmed_at is not None
+        # What kind of activity is the user being notified about?
+        if confirmed:
+            kind = "confirmed"
+            actor = j.note_confirmed_by
+        else:
+            kind = "comment"
+            actor = j.note_by
         samples.append({
             "job_id": j.id, "batch_id": b.id,
             "profile_id": p.id, "profile_name": p.name,
             "company": j.company, "title": j.title,
             "note": j.note[:300],
             "note_by": j.note_by,
+            "confirmed": confirmed,
+            "confirmed_by": j.note_confirmed_by,
+            "kind": kind,
+            "actor": actor,
             "updated_at": _iso(j.note_updated_at),
-            "unread": bool(unread),
         })
     return {"count": len(samples), "samples": samples}
 

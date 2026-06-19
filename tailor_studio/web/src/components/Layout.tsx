@@ -32,7 +32,8 @@ export default function Layout() {
   type OpenNote = {
     job_id: number; batch_id: number; profile_id: number; profile_name: string
     company: string | null; title: string | null; note: string
-    note_by: string | null; updated_at: string | null; unread: boolean
+    note_by: string | null; confirmed: boolean; confirmed_by: string | null
+    kind: 'comment' | 'confirmed'; actor: string | null; updated_at: string | null
   }
   const { data: unread } = useQuery({
     enabled: !!user,
@@ -43,6 +44,10 @@ export default function Layout() {
   const unreadCount = unread?.count ?? 0
   const confirmNote = useMutation({
     mutationFn: (n: OpenNote) => api.post(`/api/admin/batches/${n.batch_id}/jobs/${n.job_id}/note/confirm`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/notes/unread'] }),
+  })
+  const dismissNote = useMutation({
+    mutationFn: (n: OpenNote) => api.post(`/api/admin/batches/${n.batch_id}/jobs/${n.job_id}/note/seen`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/notes/unread'] }),
   })
 
@@ -136,7 +141,7 @@ export default function Layout() {
           <div className="px-3 pb-3">
             <div className="text-[10px] uppercase tracking-wider font-semibold text-rose-600 mb-1 flex items-center gap-1">
               <MessageSquare className="w-3 h-3" />
-              {unreadCount} open note{unreadCount === 1 ? '' : 's'}
+              {unreadCount} note{unreadCount === 1 ? '' : 's'} for you
             </div>
             <ul className="space-y-0.5">
               {unread.samples.slice(0, 3).map((s) => (
@@ -147,13 +152,17 @@ export default function Layout() {
                     title={`${s.note}${s.note_by ? ' — ' + s.note_by : ''}`}
                   >
                     <span className="block text-[11px] font-medium text-gray-700 truncate">{s.company || s.profile_name || '—'}</span>
-                    <span className="block text-[10px] text-gray-400 truncate">{s.note}{s.note_by ? ` · ${s.note_by}` : ''}</span>
+                    <span className="block text-[10px] truncate">
+                      {s.confirmed
+                        ? <span className="text-green-600">✓ {s.actor || 'someone'} confirmed your note</span>
+                        : <span className="text-gray-400">{s.note}{s.note_by ? ` · ${s.note_by}` : ''}</span>}
+                    </span>
                   </Link>
                   <button
-                    onClick={() => confirmNote.mutate(s)}
-                    disabled={confirmNote.isPending}
+                    onClick={() => (s.confirmed ? dismissNote.mutate(s) : confirmNote.mutate(s))}
+                    disabled={confirmNote.isPending || dismissNote.isPending}
                     className="text-gray-300 hover:text-green-600 shrink-0 mt-0.5"
-                    title="Confirm — mark handled"
+                    title={s.confirmed ? 'Dismiss' : 'Confirm — mark handled'}
                   >
                     <Check className="w-3.5 h-3.5" />
                   </button>
