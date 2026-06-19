@@ -124,6 +124,9 @@ export interface Job {
   note?: string | null
   note_updated_at?: string | null
   note_seen_at?: string | null
+  note_by?: string | null
+  note_confirmed_at?: string | null
+  note_confirmed_by?: string | null
   has_unread_note?: boolean
   // Constrained-rewrite pipeline outputs (only present after status === 'done').
   coverage_initial?: CoverageReport | null

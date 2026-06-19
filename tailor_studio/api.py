@@ -217,6 +217,9 @@ def _job_out(j: JobUrl, *, with_coverage: bool = False) -> dict:
         "note": j.note,
         "note_updated_at": _iso(j.note_updated_at),
         "note_seen_at": _iso(j.note_seen_at),
+        "note_by": j.note_by,
+        "note_confirmed_at": _iso(j.note_confirmed_at),
+        "note_confirmed_by": j.note_confirmed_by,
         "has_unread_note": bool(
             j.note and j.note.strip() and
             (j.note_seen_at is None or (j.note_updated_at and j.note_updated_at > j.note_seen_at))

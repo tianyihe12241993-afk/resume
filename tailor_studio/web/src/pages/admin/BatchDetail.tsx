@@ -464,7 +464,9 @@ function NoteDialog({
 }) {
   const [text, setText] = useState(job.note || '')
   const dirty = (job.note || '') !== text
+  const hasExisting = !!(job.note || '').trim()
   const lastUpdated = job.note_updated_at ? new Date(job.note_updated_at) : null
+  const confirmed = !!job.note_confirmed_at
   return (
     <div className="fixed inset-0 z-50 bg-black/40 grid place-items-center p-4" onClick={onClose}>
       <div className="card w-full max-w-xl p-5" onClick={(e) => e.stopPropagation()}>
@@ -490,20 +492,32 @@ function NoteDialog({
           onChange={(e) => setText(e.target.value)}
         />
 
-        <div className="flex items-center justify-between mt-3">
-          <p className="text-xs text-gray-400">
-            {lastUpdated ? <>Last edited {lastUpdated.toLocaleString()}</> : 'No note yet'}
+        <div className="flex items-center justify-between mt-1.5 text-xs">
+          <p className="text-gray-400">
+            {job.note_by && <span>by <span className="font-medium text-gray-600">{job.note_by}</span> · </span>}
+            {lastUpdated ? <>edited {lastUpdated.toLocaleString()}</> : 'No note yet'}
           </p>
-          <div className="flex items-center gap-2">
-            <button onClick={onClose} className="btn-secondary text-sm">Close</button>
-            <button
-              disabled={!dirty || pending}
-              onClick={() => onSave(text.trim())}
-              className="btn-primary text-sm"
-            >
-              {pending ? 'Saving…' : dirty ? 'Save note' : 'Saved'}
-            </button>
-          </div>
+          {hasExisting && (
+            confirmed
+              ? <span className="text-green-700 font-medium">✓ Confirmed{job.note_confirmed_by ? ` by ${job.note_confirmed_by}` : ''}</span>
+              : <span className="text-amber-700 font-medium">● Open</span>
+          )}
+        </div>
+        {hasExisting && dirty && (
+          <p className="text-[11px] text-amber-700 mt-2 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+            Updating re-opens this note and notifies the team again.
+          </p>
+        )}
+
+        <div className="flex items-center justify-end gap-2 mt-3">
+          <button onClick={onClose} className="btn-secondary text-sm">Close</button>
+          <button
+            disabled={!dirty || pending}
+            onClick={() => onSave(text.trim())}
+            className="btn-primary text-sm"
+          >
+            {pending ? 'Saving…' : !dirty ? 'Saved' : hasExisting ? 'Update & notify' : 'Save note'}
+          </button>
         </div>
       </div>
     </div>

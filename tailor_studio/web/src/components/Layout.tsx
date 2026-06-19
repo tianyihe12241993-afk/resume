@@ -138,35 +138,29 @@ export default function Layout() {
               <MessageSquare className="w-3 h-3" />
               {unreadCount} open note{unreadCount === 1 ? '' : 's'}
             </div>
-            <ul className="space-y-1.5">
-              {unread.samples.slice(0, 6).map((s) => (
-                <li key={s.job_id} className="bg-rose-50/60 border border-rose-200 rounded px-2 py-1.5">
+            <ul className="space-y-0.5">
+              {unread.samples.slice(0, 3).map((s) => (
+                <li key={s.job_id} className="group flex items-start gap-1">
                   <Link
                     to={`/admin/batches/${s.batch_id}?job=${s.job_id}`}
-                    className="block text-[11px] text-gray-800 hover:text-brand-700"
-                    title={s.note}
+                    className="flex-1 min-w-0 hover:bg-rose-50/60 rounded px-1.5 py-0.5"
+                    title={`${s.note}${s.note_by ? ' — ' + s.note_by : ''}`}
                   >
-                    <span className="font-semibold">{s.company || s.profile_name || '—'}</span>
-                    {s.title && <span className="text-gray-400"> · {s.title}</span>}
-                    <span className="block text-gray-500 truncate mt-0.5">“{s.note}”</span>
+                    <span className="block text-[11px] font-medium text-gray-700 truncate">{s.company || s.profile_name || '—'}</span>
+                    <span className="block text-[10px] text-gray-400 truncate">{s.note}{s.note_by ? ` · ${s.note_by}` : ''}</span>
                   </Link>
-                  <div className="flex items-center justify-between mt-1">
-                    <span className="text-[10px] text-gray-400">
-                      {s.note_by ? `by ${s.note_by}` : ''}{s.profile_name ? ` · ${s.profile_name}` : ''}
-                    </span>
-                    <button
-                      onClick={() => confirmNote.mutate(s)}
-                      disabled={confirmNote.isPending}
-                      className="text-[10px] font-semibold text-green-700 hover:text-green-800 flex items-center gap-0.5"
-                      title="Confirm — mark this feedback as handled"
-                    >
-                      <Check className="w-3 h-3" /> Confirm
-                    </button>
-                  </div>
+                  <button
+                    onClick={() => confirmNote.mutate(s)}
+                    disabled={confirmNote.isPending}
+                    className="text-gray-300 hover:text-green-600 shrink-0 mt-0.5"
+                    title="Confirm — mark handled"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                  </button>
                 </li>
               ))}
-              {unreadCount > 6 && (
-                <li className="text-[10px] text-gray-400 italic pl-1">…and {unreadCount - 6} more</li>
+              {unreadCount > 3 && (
+                <li className="text-[10px] text-gray-400 italic pl-1.5">…and {unreadCount - 3} more</li>
               )}
             </ul>
           </div>
