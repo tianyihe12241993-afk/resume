@@ -180,6 +180,11 @@ class JobUrl(Base):
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     note_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     note_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Note as feedback item: who wrote it, and whether it's been confirmed
+    # (acknowledged/resolved). Open = note present and note_confirmed_at is null.
+    note_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    note_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    note_confirmed_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
@@ -299,6 +304,9 @@ def init_db() -> None:
             ("upload_match",        "VARCHAR(16)"),
             ("upload_observed_at",  "DATETIME"),
             ("note",                "TEXT"),
+            ("note_by",             "VARCHAR(64)"),
+            ("note_confirmed_at",   "DATETIME"),
+            ("note_confirmed_by",   "VARCHAR(64)"),
             ("note_updated_at",     "DATETIME"),
             ("note_seen_at",        "DATETIME"),
             ("apply_count",         "INTEGER NOT NULL DEFAULT 0"),

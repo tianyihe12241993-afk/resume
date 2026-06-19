@@ -1912,10 +1912,36 @@ def api_save_note(
     text = (body.text or "").strip()
     j.note = text or None
     j.note_updated_at = datetime.now(timezone.utc) if text else None
-    if not text:
-        # Clearing the note also clears the seen marker so the unread state
-        # is consistent ("nothing to read").
+    if text:
+        # A new/edited note records its author and re-opens it (unconfirmed).
+        j.note_by = _uname(me)
+        j.note_confirmed_at = None
+        j.note_confirmed_by = None
+    else:
+        # Clearing the note resets all its metadata.
         j.note_seen_at = None
+        j.note_by = None
+        j.note_confirmed_at = None
+        j.note_confirmed_by = None
+    db.commit()
+    return {"job": _job_out(j)}
+
+
+@router.post("/admin/batches/{bid}/jobs/{jid}/note/confirm")
+def api_confirm_note(
+    bid: int, jid: int,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_user),
+):
+    """Mark a note as confirmed (acknowledged/resolved) — it leaves the open
+    feedback queue. Set confirmed=false in the body to re-open it."""
+    j = _user_job(db, me, bid, jid)
+    if j.note_confirmed_at is None:
+        j.note_confirmed_at = datetime.now(timezone.utc)
+        j.note_confirmed_by = _uname(me)
+    else:
+        j.note_confirmed_at = None
+        j.note_confirmed_by = None
     db.commit()
     return {"job": _job_out(j)}
 
@@ -1938,31 +1964,34 @@ def api_unread_notes(
     db: Session = Depends(get_db),
     me=Depends(auth.require_user),
 ):
-    """Count of jobs across the user's profiles that have an unread
-    collaboration note. Powers the sidebar notification dot."""
+    """Open feedback notes across the user's profiles — notes that exist and
+    haven't been confirmed yet. Powers the sidebar feedback queue (each item is
+    clickable to the job, shows its author, and can be confirmed)."""
     rows = (
         db.query(JobUrl, Batch, Profile)
         .join(Batch, JobUrl.batch_id == Batch.id)
         .join(Profile, Batch.profile_id == Profile.id)
         .filter(Profile.id.in_(_accessible_pids(db, me)))
         .filter(JobUrl.note.isnot(None))
+        .filter(JobUrl.note_confirmed_at.is_(None))
+        .order_by(JobUrl.note_updated_at.desc())
         .all()
     )
-    unread = 0
     samples = []
-    for (j, b, _p) in rows:
+    for (j, b, p) in rows:
         if not j.note or not j.note.strip():
             continue
-        if j.note_seen_at is None or (j.note_updated_at and j.note_updated_at > j.note_seen_at):
-            unread += 1
-            if len(samples) < 5:
-                samples.append({
-                    "job_id": j.id, "batch_id": b.id,
-                    "company": j.company, "title": j.title,
-                    "note": j.note[:200],
-                    "updated_at": _iso(j.note_updated_at),
-                })
-    return {"count": unread, "samples": samples}
+        unread = j.note_seen_at is None or (j.note_updated_at and j.note_updated_at > j.note_seen_at)
+        samples.append({
+            "job_id": j.id, "batch_id": b.id,
+            "profile_id": p.id, "profile_name": p.name,
+            "company": j.company, "title": j.title,
+            "note": j.note[:300],
+            "note_by": j.note_by,
+            "updated_at": _iso(j.note_updated_at),
+            "unread": bool(unread),
+        })
+    return {"count": len(samples), "samples": samples}
 
 
 @router.post("/admin/batches/{bid}/retry-errors")

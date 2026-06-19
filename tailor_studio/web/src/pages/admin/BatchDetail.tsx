@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useState, useEffect, useRef } from 'react'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronLeft, Download, ExternalLink, RotateCw, MessageSquare,
@@ -12,6 +12,8 @@ import { formatDateTime } from '@/lib/format'
 
 export default function BatchDetailPage() {
   const { id } = useParams()
+  const [searchParams] = useSearchParams()
+  const highlightJobId = Number(searchParams.get('job')) || null
   const bid = Number(id)
   const qc = useQueryClient()
 
@@ -137,6 +139,7 @@ export default function BatchDetailPage() {
                 <AdminRow
                   key={j.id}
                   job={j}
+                  highlight={j.id === highlightJobId}
                   onRetry={() => retry.mutate(j.id)}
                   onAppStatus={(status) => setAppStatus.mutate({ jid: j.id, status })}
                   onReapply={() => reapply.mutate(j.id)}
@@ -244,7 +247,7 @@ function WorkTypeBadge({ value }: { value: 'remote' | 'hybrid' | 'onsite' | null
 }
 
 function AdminRow({
-  job, onRetry, onAppStatus, onReapply, onNeedsJd, onOpenNote,
+  job, onRetry, onAppStatus, onReapply, onNeedsJd, onOpenNote, highlight,
 }: {
   job: Job
   onRetry: () => void
@@ -252,14 +255,24 @@ function AdminRow({
   onReapply: () => void
   onNeedsJd: () => void
   onOpenNote: () => void
+  highlight?: boolean
 }) {
   const isDone = job.status === 'done'
   const needsJd = job.status === 'needs_manual_jd'
+  const rowRef = useRef<HTMLTableRowElement>(null)
+  useEffect(() => {
+    if (highlight && rowRef.current) {
+      rowRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, [highlight])
   return (
-    <tr className={clsx(
-      'hover:bg-slate-50/80 transition group',
-      rowTintForStatus(job.status),
-    )}>
+    <tr
+      ref={rowRef}
+      className={clsx(
+        'hover:bg-slate-50/80 transition group',
+        rowTintForStatus(job.status),
+        highlight && 'ring-2 ring-amber-400 ring-inset bg-amber-50/60',
+      )}>
       {/* status — colored orb */}
       <td className="px-3 py-3 align-top text-center">
         <StatusOrb status={job.status} size={28} />

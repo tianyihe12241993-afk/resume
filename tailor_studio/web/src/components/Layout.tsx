@@ -27,14 +27,24 @@ export default function Layout() {
   const logout = useLogout()
   const [q, setQ] = useState('')
 
-  // Poll for unread collaboration notes. Drives the badge on Dashboard.
+  const qc = useQueryClient()
+  // Poll for open feedback notes (unconfirmed). Powers the sidebar feedback queue.
+  type OpenNote = {
+    job_id: number; batch_id: number; profile_id: number; profile_name: string
+    company: string | null; title: string | null; note: string
+    note_by: string | null; updated_at: string | null; unread: boolean
+  }
   const { data: unread } = useQuery({
     enabled: !!user,
     queryKey: ['admin/notes/unread'],
-    queryFn: () => api.get<{ count: number; samples: Array<{ job_id: number; batch_id: number; company: string|null; title: string|null; note: string }> }>('/api/admin/notes/unread'),
+    queryFn: () => api.get<{ count: number; samples: OpenNote[] }>('/api/admin/notes/unread'),
     refetchInterval: 15_000,
   })
   const unreadCount = unread?.count ?? 0
+  const confirmNote = useMutation({
+    mutationFn: (n: OpenNote) => api.post(`/api/admin/batches/${n.batch_id}/jobs/${n.job_id}/note/confirm`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/notes/unread'] }),
+  })
 
   // Admin-only: pending member-approval requests, for the sidebar badge.
   const { data: members } = useQuery({
@@ -52,7 +62,6 @@ export default function Layout() {
   }, [chatUnread])
 
   // Username editing (every member can set their own).
-  const qc = useQueryClient()
   const [editName, setEditName] = useState(false)
   const [nameVal, setNameVal] = useState('')
   const saveName = useMutation({
@@ -127,25 +136,37 @@ export default function Layout() {
           <div className="px-3 pb-3">
             <div className="text-[10px] uppercase tracking-wider font-semibold text-rose-600 mb-1 flex items-center gap-1">
               <MessageSquare className="w-3 h-3" />
-              {unreadCount} unread note{unreadCount === 1 ? '' : 's'}
+              {unreadCount} open note{unreadCount === 1 ? '' : 's'}
             </div>
-            <ul className="space-y-1">
-              {unread.samples.slice(0, 3).map((s) => (
-                <li key={s.job_id}>
+            <ul className="space-y-1.5">
+              {unread.samples.slice(0, 6).map((s) => (
+                <li key={s.job_id} className="bg-rose-50/60 border border-rose-200 rounded px-2 py-1.5">
                   <Link
-                    to={`/admin/batches/${s.batch_id}`}
-                    className="block text-[11px] text-gray-700 hover:text-brand-700 bg-rose-50/60 hover:bg-rose-50 border border-rose-200 rounded px-2 py-1 truncate"
+                    to={`/admin/batches/${s.batch_id}?job=${s.job_id}`}
+                    className="block text-[11px] text-gray-800 hover:text-brand-700"
                     title={s.note}
                   >
-                    <span className="font-semibold">{s.company || '—'}</span>
-                    <span className="text-gray-400"> · {s.title || ''}</span>
+                    <span className="font-semibold">{s.company || s.profile_name || '—'}</span>
+                    {s.title && <span className="text-gray-400"> · {s.title}</span>}
+                    <span className="block text-gray-500 truncate mt-0.5">“{s.note}”</span>
                   </Link>
+                  <div className="flex items-center justify-between mt-1">
+                    <span className="text-[10px] text-gray-400">
+                      {s.note_by ? `by ${s.note_by}` : ''}{s.profile_name ? ` · ${s.profile_name}` : ''}
+                    </span>
+                    <button
+                      onClick={() => confirmNote.mutate(s)}
+                      disabled={confirmNote.isPending}
+                      className="text-[10px] font-semibold text-green-700 hover:text-green-800 flex items-center gap-0.5"
+                      title="Confirm — mark this feedback as handled"
+                    >
+                      <Check className="w-3 h-3" /> Confirm
+                    </button>
+                  </div>
                 </li>
               ))}
-              {unreadCount > 3 && (
-                <li className="text-[10px] text-gray-400 italic pl-1">
-                  …and {unreadCount - 3} more
-                </li>
+              {unreadCount > 6 && (
+                <li className="text-[10px] text-gray-400 italic pl-1">…and {unreadCount - 6} more</li>
               )}
             </ul>
           </div>
