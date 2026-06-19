@@ -143,8 +143,8 @@ export default function Layout() {
               <MessageSquare className="w-3 h-3" />
               {unreadCount} note{unreadCount === 1 ? '' : 's'} for you
             </div>
-            <ul className="space-y-0.5">
-              {unread.samples.slice(0, 3).map((s) => (
+            <ul className="space-y-0.5 max-h-60 overflow-y-auto pr-0.5">
+              {unread.samples.map((s) => (
                 <li key={s.job_id} className="group flex items-start gap-1">
                   <Link
                     to={`/admin/batches/${s.batch_id}?job=${s.job_id}`}
@@ -168,9 +168,6 @@ export default function Layout() {
                   </button>
                 </li>
               ))}
-              {unreadCount > 3 && (
-                <li className="text-[10px] text-gray-400 italic pl-1.5">…and {unreadCount - 3} more</li>
-              )}
             </ul>
           </div>
         )}
