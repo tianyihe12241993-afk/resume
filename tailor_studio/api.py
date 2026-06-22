@@ -1826,6 +1826,62 @@ def api_retry_job(
     return {"job": _job_out(j, me=me)}
 
 
+@router.post("/admin/batches/{bid}/jobs/{jid}/delete")
+def api_delete_job(
+    bid: int, jid: int,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_admin),
+):
+    """Admin-only: remove a job from the batch (e.g. a dead/errored URL),
+    deleting its row and any generated output files."""
+    import pathlib
+    j = _user_job(db, me, bid, jid)
+    for fn in (j.docx_filename, j.pdf_filename):
+        if fn:
+            p = config.OUTPUTS_DIR / fn
+            try:
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                pass
+    if j.docx_filename:
+        pdf = config.OUTPUTS_DIR / (pathlib.Path(j.docx_filename).stem + ".pdf")
+        try:
+            if pdf.exists():
+                pdf.unlink()
+        except OSError:
+            pass
+    db.delete(j)
+    db.commit()
+    return {"deleted": jid}
+
+
+@router.post("/admin/batches/{bid}/delete-errors")
+def api_delete_errors(
+    bid: int,
+    db: Session = Depends(get_db),
+    me=Depends(auth.require_admin),
+):
+    """Admin-only: remove ALL errored / unusable-JD jobs from a batch at once."""
+    import pathlib
+    b = _user_batch(db, me, bid)
+    rows = [j for j in b.urls if j.status in (STATUS_ERROR, STATUS_NEEDS_JD)]
+    n = 0
+    for j in rows:
+        for fn in (j.docx_filename, j.pdf_filename):
+            if fn:
+                try:
+                    p = config.OUTPUTS_DIR / fn
+                    if p.exists():
+                        p.unlink()
+                except OSError:
+                    pass
+        db.delete(j)
+        n += 1
+    db.commit()
+    return {"deleted": n}
+
+
 class ClaimIn(BaseModel):
     terms: list[str]
 

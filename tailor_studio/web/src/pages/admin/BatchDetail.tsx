@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  ChevronLeft, Download, ExternalLink, RotateCw, MessageSquare,
+  ChevronLeft, Download, ExternalLink, RotateCw, MessageSquare, Trash2,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { api, type BatchDetail, type Job, FAIL_REASON } from '@/lib/api'
@@ -29,6 +29,14 @@ export default function BatchDetailPage() {
   })
   const retryAll = useMutation({
     mutationFn: () => api.post<{ requeued: number }>(`/api/admin/batches/${bid}/retry-errors`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/batch', bid] }),
+  })
+  const removeJob = useMutation({
+    mutationFn: (jid: number) => api.post(`/api/admin/batches/${bid}/jobs/${jid}/delete`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/batch', bid] }),
+  })
+  const removeErrors = useMutation({
+    mutationFn: () => api.post<{ deleted: number }>(`/api/admin/batches/${bid}/delete-errors`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin/batch', bid] }),
   })
   const setAppStatus = useMutation({
@@ -113,6 +121,18 @@ export default function BatchDetailPage() {
               Retry {summary.errors} error{summary.errors === 1 ? '' : 's'}
             </button>
           )}
+          {(summary.errors > 0 || summary.needs_jd > 0) && (
+            <button
+              onClick={() => {
+                const n = summary.errors + summary.needs_jd
+                if (confirm(`Remove ${n} unresolved job${n === 1 ? '' : 's'} (errors + need-JD) from this batch? This cannot be undone.`))
+                  removeErrors.mutate()
+              }}
+              disabled={removeErrors.isPending}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-red-700 bg-white hover:bg-red-50 border border-red-300 rounded-md transition disabled:opacity-50">
+              <Trash2 className="w-3.5 h-3.5" /> Remove {summary.errors + summary.needs_jd} unresolved
+            </button>
+          )}
           {summary.done > 0 && (
             <a href={`/download/batch/${bid}/zip`} className="btn-primary text-xs py-1.5 px-3">
               <Download className="w-3.5 h-3.5" /> Download all ({summary.done}) .zip
@@ -144,6 +164,10 @@ export default function BatchDetailPage() {
                   onAppStatus={(status) => setAppStatus.mutate({ jid: j.id, status })}
                   onReapply={() => reapply.mutate(j.id)}
                   onNeedsJd={() => setManualJob(j)}
+                  onDelete={() => {
+                    if (confirm(`Remove this job from the batch?\n\n${j.company || '(no company)'} — ${j.title || j.url}\n\nThis cannot be undone.`))
+                      removeJob.mutate(j.id)
+                  }}
                   onOpenNote={() => {
                     setNoteJob(j)
                     if (j.has_unread_note) markNoteSeen.mutate(j.id)
@@ -247,7 +271,7 @@ function WorkTypeBadge({ value }: { value: 'remote' | 'hybrid' | 'onsite' | null
 }
 
 function AdminRow({
-  job, onRetry, onAppStatus, onReapply, onNeedsJd, onOpenNote, highlight,
+  job, onRetry, onAppStatus, onReapply, onNeedsJd, onOpenNote, onDelete, highlight,
 }: {
   job: Job
   onRetry: () => void
@@ -255,6 +279,7 @@ function AdminRow({
   onReapply: () => void
   onNeedsJd: () => void
   onOpenNote: () => void
+  onDelete: () => void
   highlight?: boolean
 }) {
   const isDone = job.status === 'done'
@@ -381,6 +406,14 @@ function AdminRow({
               )}
             >
               {needsJd ? 'Paste JD' : job.status === 'error' ? 'Fix JD' : 'Edit JD'}
+            </button>
+          )}
+          {(needsJd || job.status === 'error') && (
+            <button
+              onClick={onDelete}
+              title="Remove this job from the batch"
+              className="inline-flex items-center justify-center p-1.5 text-gray-400 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 rounded-md transition">
+              <Trash2 className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
