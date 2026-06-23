@@ -196,15 +196,47 @@ def _build_struct_from_analysis(paras: list, analysis: dict) -> ResumeStruct:
             bullets=[paras[i].text for i in b],
         ))
 
+    # Section-header phrases that are NOT real skill categories. The structure
+    # analyzer sometimes mis-pairs the SKILLS section header (e.g. "Core
+    # Technical Skills") as a category and swallows the first real category
+    # (e.g. "Languages: ...") as that header's items — dropping a whole row.
+    # We detect and repair that here so no category is ever lost.
+    _SECTION_HEADERS = {
+        "skills", "technical skills", "core skills", "core technical skills",
+        "core competencies", "skills & technologies", "technical proficiencies",
+        "technologies", "areas of expertise", "expertise",
+    }
+
     skills: list = []
     for sa in (analysis.get("skills") or []):
         c = sa.get("category_idx")
         it = sa.get("items_idx")
         if c is None or it is None or c not in valid_idx or it not in valid_idx:
             continue
+        cat_text = paras[c].text
+        items_text = paras[it].text
+        cat_label = cat_text.split(":", 1)[0].strip().rstrip(":").strip().lower()
+        # Repair: the "category" is actually the section header, and the items
+        # paragraph is itself a real "Label: items" category row on its own line.
+        if (
+            c != it
+            and cat_label in _SECTION_HEADERS
+            and ":" in items_text
+        ):
+            # Promote the items paragraph to a standalone category row; drop the
+            # header (it's a section title, not a category).
+            skills.append(SkillBlock(
+                category_idx=it, items_idx=it,
+                category=items_text, items=items_text,
+            ))
+            continue
+        # A bare section-header row with no real items is just the title — skip.
+        if cat_label in _SECTION_HEADERS and (c == it or ":" not in items_text) \
+                and ":" not in cat_text:
+            continue
         skills.append(SkillBlock(
             category_idx=c, items_idx=it,
-            category=paras[c].text, items=paras[it].text,
+            category=cat_text, items=items_text,
         ))
 
     if summary_idx < 0 and not jobs and not skills:
@@ -850,14 +882,14 @@ RULES — any violation invalidates the output:
 1. Output EXACTLY the same number of rows as the input.
 2. You may ADD a skill only if it is in the ALLOWED list. NEVER add a skill that is not in the ALLOWED list, even if the JD wants it.
 3. Never remove a skill the candidate already listed. No duplicates within a row.
-4. Place each added skill in the most fitting row.
+4. Place each added skill in the row whose CATEGORY LABEL it genuinely belongs to — a language goes in the Languages row, a framework in the Frameworks row, a cloud service in the Cloud row, etc. NEVER put an item in a row whose label doesn't describe it.
 5. Reorder the rows so the most JD-relevant categories come first; within each row, lead with the most JD-relevant items.
-6. Canonicalize names to the JD's spelling (write "Kubernetes" if the JD says Kubernetes and the resume said "k8s").
-7. You MAY rename a category label to clearer / JD-aligned wording, as long as it stays truthful to the row's contents.
+6. Canonicalize item names to the JD's spelling (write "Kubernetes" if the JD says Kubernetes and the resume said "k8s"). This applies to ITEMS only.
+7. NEVER change, rename, reword, merge, or split a category label. Each output row's "category" MUST be copied VERBATIM from one of the input rows — same characters, same casing. You only reorder rows and edit the items inside them; the set of category labels must be identical to the input.
 
 OUTPUT — emit STRICT JSON inside <json>...</json> tags, nothing else:
-{"rows": [{"category": "Languages", "items": "Python, Go, ..."}, ...]}
-Exactly the same number of rows as the input, in your chosen order."""
+{"rows": [{"category": "<verbatim input label>", "items": "Python, Go, ..."}, ...]}
+Exactly the same number of rows as the input, in your chosen order, each category label copied verbatim from the input."""
 
 
 def tailor_skills(
@@ -922,6 +954,34 @@ def tailor_skills(
         # docx paragraph slots.
         if len(out) != n:
             return None
+
+        # LABEL LOCK — the model is NOT trusted to keep category labels intact
+        # (it tends to rename "Backend" -> "Backend Development", or move a
+        # language into a "Frameworks" row). Category labels are the candidate's
+        # deliberate, accurate taxonomy and must never change. So we discard
+        # every model-emitted label and re-attach the ORIGINAL label by pairing
+        # each output row back to the input row it most overlaps with (by item
+        # set). Each input label is used exactly once.
+        def _item_set(items: str) -> set:
+            return {t.strip().lower() for t in items.split(",") if t.strip()}
+
+        in_sets = [(_item_set(it), cat) for cat, it in rows]
+        used = [False] * n
+        relabeled: list[tuple[str, str]] = []
+        for _model_cat, out_items in out:
+            out_set = _item_set(out_items)
+            best_i, best_score = -1, -1
+            for i, (in_set, _cat) in enumerate(in_sets):
+                if used[i]:
+                    continue
+                score = len(in_set & out_set)
+                if score > best_score:
+                    best_score, best_i = score, i
+            if best_i < 0:
+                best_i = next((i for i in range(n) if not used[i]), 0)
+            used[best_i] = True
+            relabeled.append((in_sets[best_i][1], out_items))
+        out = relabeled
         # Persist (best-effort) so repeated runs of this (profile, JD) skip the call.
         try:
             _SKILLS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1105,17 +1165,40 @@ def apply_tailoring(
             set_paragraph_text(paras[idx], new_bullet.strip())
 
     if resume.skills:
-        for skill, cat, items in zip(
-            resume.skills,
-            tailored.get("skill_categories", []),
-            tailored.get("skill_items", []),
-        ):
+        # Pair tailored rows back to ORIGINAL skill paragraphs BY CATEGORY LABEL,
+        # not by position. The pipeline reorders rows for JD relevance, so a
+        # positional zip would write reordered content into the wrong paragraph
+        # slot (e.g. "Cloud" content landing in the "Languages" paragraph) and,
+        # on any count mismatch, silently drop a whole category. The skills
+        # rewriter's label-lock keeps category labels verbatim, so each tailored
+        # row matches exactly one original skill by label; unmatched rows fall
+        # back to the original items so nothing is lost.
+        cats = tailored.get("skill_categories", [])
+        items_list = tailored.get("skill_items", [])
+
+        def _label(text: str) -> str:
+            return (text or "").split(":", 1)[0].strip().rstrip(":").strip().lower()
+
+        tailored_by_label: dict[str, str] = {}
+        for c, it in zip(cats, items_list):
+            tailored_by_label[_label(c)] = it
+
+        for skill in resume.skills:
+            orig_label, orig_body = _split_skill(skill.category, skill.items)
+            key = orig_label.strip().lower()
+            items = tailored_by_label.get(key)
+            if items is None:
+                items = orig_body
+            else:
+                # Strip any leading label the rewriter may have echoed.
+                _, items = _split_skill(orig_label, items)
             if skill.category_idx == skill.items_idx:
                 # Category + items share one paragraph — write them together
-                # (bold label + plain items) so neither clobbers the other.
-                _apply_skill_row(paras[skill.category_idx], cat, items)
+                # (bold label + plain items); pass the clean original label so
+                # the title is preserved and never renamed or duplicated.
+                _apply_skill_row(paras[skill.category_idx], orig_label, items)
             else:
-                set_paragraph_text(paras[skill.category_idx], cat.strip())
+                set_paragraph_text(paras[skill.category_idx], orig_label.strip())
                 set_paragraph_text(paras[skill.items_idx], items.strip())
 
     dst_docx.parent.mkdir(parents=True, exist_ok=True)

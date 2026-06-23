@@ -1293,7 +1293,7 @@ class DraftAnswersIn(BaseModel):
     questions: list[DraftQuestion]
 
 
-_ANSWER_CACHE_VERSION = "3"   # bumped: post-process strips em/en-dashes
+_ANSWER_CACHE_VERSION = "4"   # bumped: drafts via make_client() on gpt-4o
 
 
 def _answer_cache_path(profile_id: Optional[int], question_text: str, context_hash: str) -> Path:
@@ -1369,7 +1369,7 @@ def _draft_one(client, question: DraftQuestion, context_block: str,
         f"{instruction}"
     )
     resp = client.messages.create(
-        model=app_config.EXTRACT_MODEL,   # Haiku — fast + cheap
+        model=app_config.TAILOR_MODEL,   # gpt-4o under OpenAI provider
         max_tokens=600,
         temperature=0.3,
         system=[{"type": "text",
@@ -1395,7 +1395,7 @@ def _draft_one(client, question: DraftQuestion, context_block: str,
     )
     if any(p in out.lower() for p in refusal_phrases):
         retry = client.messages.create(
-            model=app_config.EXTRACT_MODEL,
+            model=app_config.TAILOR_MODEL,
             max_tokens=600,
             temperature=0.5,
             system=[{"type": "text",
@@ -1531,19 +1531,24 @@ def api_extension_draft_answers(
     user=Depends(auth.require_user),
 ):
     """Draft answers for a list of application-form questions using the
-    candidate's deep profile + JD + standard answer library. One Claude
-    call per question. Used by the co-worker extension's '✨ Draft' button."""
-    from anthropic import Anthropic
+    candidate's deep profile + JD + standard answer library. One LLM call per
+    question. Used by the co-worker extension's '✨ Draft' button.
+
+    Goes through the shared make_client() factory so it honors LLM_PROVIDER
+    (Anthropic or OpenAI) instead of hard-wiring a raw Anthropic client — under
+    LLM_PROVIDER=openai the draft model maps to gpt-4o."""
+    from app.llm import make_client
     from app import config as app_config
-    if not app_config.ANTHROPIC_API_KEY:
-        raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
     if not body.questions:
         return {"drafts": [], "profile_id": None}
 
     context_text, matched_pid, identity_hash = _build_candidate_context_block(
         db, user, body.url, body.profile_id,
     )
-    client = Anthropic(api_key=app_config.ANTHROPIC_API_KEY)
+    try:
+        client = make_client()
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
 
     drafts: list[dict] = []
     for q in body.questions:
